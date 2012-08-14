@@ -304,6 +304,16 @@ sealed abstract class List[+A] extends AbstractSeq[A]
 
   @deprecated("use `distinct` instead", "2.8.0")
   def removeDuplicates: List[A] = distinct
+
+  @inline override /*LinearSeqOptimized*/
+  final def forall(p: A => Boolean): Boolean = {
+    var these = this
+    while (!these.isEmpty) {
+      if (!p(these.head)) return false
+      these = these.tail
+    }
+    true
+  }
   
   @inline override
   final def filter(p: A => Boolean): List[A] = {
