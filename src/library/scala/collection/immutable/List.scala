@@ -315,6 +315,16 @@ sealed abstract class List[+A] extends AbstractSeq[A]
     true
   }
   
+  @inline override /*LinearSeqOptimized*/
+  final def exists(p: A => Boolean): Boolean = {
+    var these = this
+    while (!these.isEmpty) {
+      if (p(these.head)) return true
+      these = these.tail
+    }
+    false
+  }
+  
   @inline override
   final def filter(p: A => Boolean): List[A] = {
     var these = this
@@ -335,6 +345,9 @@ sealed abstract class List[+A] extends AbstractSeq[A]
     for (x <- this) b += f(x)
     b.result
   }
+  
+  @inline override /*SeqLike*/ 
+  final def contains(elem: Any): Boolean = exists (_ == elem)
 }
 
 /** The empty list.
