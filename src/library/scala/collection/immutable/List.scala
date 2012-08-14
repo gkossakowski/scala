@@ -304,6 +304,14 @@ sealed abstract class List[+A] extends AbstractSeq[A]
 
   @deprecated("use `distinct` instead", "2.8.0")
   def removeDuplicates: List[A] = distinct
+  
+  @inline override /*TraversableLike*/
+  final def map[B, That](f: A => B)(implicit bf: CanBuildFrom[List[A], B, That]): That = {
+    val b = bf(repr)
+    b.sizeHint(this)
+    for (x <- this) b += f(x)
+    b.result
+  }
 }
 
 /** The empty list.
