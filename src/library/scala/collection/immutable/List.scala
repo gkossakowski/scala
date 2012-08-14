@@ -152,8 +152,8 @@ sealed abstract class List[+A] extends AbstractSeq[A]
    *  @usecase def mapConserve(f: A => A): List[A]
    *    @inheritdoc
    */
-  def mapConserve[B >: A <: AnyRef](f: A => B): List[B] = {
-    @tailrec
+  @inline final def mapConserve[B >: A <: AnyRef](f: A => B): List[B] = {
+    @tailrec @inline
     def loop(mapped: ListBuffer[B], unchanged: List[A], pending: List[A]): List[B] =
       if (pending.isEmpty) {
         if (mapped eq null) unchanged
