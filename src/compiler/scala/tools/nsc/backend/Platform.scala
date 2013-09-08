@@ -9,6 +9,7 @@ package backend
 import util.ClassPath
 import io.AbstractFile
 import scala.tools.nsc.classpath.FlatClasspath
+import scala.tools.nsc.util.ClassfileLookup
 
 /** The platform dependent pieces of Global.
  */
@@ -32,14 +33,6 @@ trait Platform {
 
   /** The various ways a boxed primitive might materialize at runtime. */
   def isMaybeBoxed(sym: Symbol): Boolean
-
-  /**
-   * Tells whether a class should be loaded and entered into the package
-   * scope. On .NET, this method returns `false` for all synthetic classes
-   * (anonymous classes, implementation classes, module classes), their
-   * symtab is encoded in the pickle of another class.
-   */
-  def doLoad(cls: ClassPath[AbstractFile]#ClassRep): Boolean
 
   /**
    * Tells whether a class with both a binary and a source representation
