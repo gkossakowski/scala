@@ -358,7 +358,8 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
     }
   }
 
-  if (settings.verbose || settings.Ylogcp) {
+  // TODO: implement classpath printing in FlatClasspath
+  if ((settings.verbose || settings.Ylogcp) && (settings.YclasspathImpl.value != "flat")) {
     // Uses the "do not truncate" inform
     informComplete("[search path for source files: " + classPath.sourcepaths.mkString(",") + "]")
     informComplete("[search path for class files: " + classPath.asClasspathString + "]")
