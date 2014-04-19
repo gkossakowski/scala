@@ -24,8 +24,13 @@ private[internal] trait TypeConstraints {
       private var logSize: Int = 0
       private var lastDumpedLogSize: Int = 0
       private val dumpOnChangeOfLogSizeGreaterThan: Int = 10000
+
       def changeLogSizeBy(diff: Int): Unit = {
         logSize = logSize + diff
+        dumpIfNeeded
+      }
+      def zeroLogSize(): Unit = {
+        logSize = 0
         dumpIfNeeded
       }
       private def dumpIfNeeded: Unit = {
@@ -62,6 +67,7 @@ private[internal] trait TypeConstraints {
     }
 
     def clear() {
+      logSizeTracker.zeroLogSize()
       if (settings.debug)
         self.log("Clearing " + log.size + " entries from the undoLog.")
       log = Nil
