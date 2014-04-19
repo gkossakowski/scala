@@ -20,6 +20,22 @@ private[internal] trait TypeConstraints {
     private type UndoPairs = List[(TypeVar, TypeConstraint)]
     //OPT this method is public so we can do `manual inlining`
     var log: UndoPairs = List()
+    private object logSizeTracker {
+      private var logSize: Int = 0
+      private var lastDumpedLogSize: Int = 0
+      private val dumpOnChangeOfLogSizeGreaterThan: Int = 10000
+      def changeLogSizeBy(diff: Int): Unit = {
+        logSize = logSize + diff
+        dumpIfNeeded
+      }
+      private def dumpIfNeeded: Unit = {
+        if (math.abs(logSize - lastDumpedLogSize) > dumpOnChangeOfLogSizeGreaterThan) {
+          lastDumpedLogSize = logSize
+          println(s"Current undoLog size = $logSize")
+          println(Thread.currentThread().getStackTrace().mkString("\n"))
+        }
+      }
+    }
 
     // register with the auto-clearing cache manager
     perRunCaches.recordCache(this)
@@ -32,6 +48,7 @@ private[internal] trait TypeConstraints {
         val (tv, constr) = log.head
         tv.constr = constr
         log = log.tail
+        logSizeTracker.changeLogSizeBy(-1)
       }
     }
 
@@ -41,6 +58,7 @@ private[internal] trait TypeConstraints {
       */
     private[reflect] def record(tv: TypeVar) = {
       log ::= ((tv, tv.constr.cloneInternal))
+      logSizeTracker.changeLogSizeBy(1)
     }
 
     def clear() {
