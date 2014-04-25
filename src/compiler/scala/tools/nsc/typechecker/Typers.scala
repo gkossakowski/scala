@@ -3054,7 +3054,7 @@ trait Typers extends Adaptations with Tags with TypersTracking with PatternTyper
           // SI-5877 The decls of a package include decls of the package object. But we don't want to add
           //         the corresponding synthetics to the package class, only to the package object class.
           def shouldAdd(sym: Symbol) =
-            inBlock || !context.isInPackageObject(sym, context.owner)
+            inBlock //|| !context.isInPackageObject(sym, context.owner)
           for (sym <- scope if shouldAdd(sym))
             for (tree <- context.unit.synthetics get sym) {
               newStats += typedStat(tree) // might add even more synthetics to the scope
