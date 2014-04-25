@@ -3131,7 +3131,7 @@ trait Typers extends Adaptations with Tags with TypersTracking with PatternTyper
       }
       if (phase.erasedTypes) stats1
       else {
-        checkNoDoubleDefs(stats1)
+        //checkNoDoubleDefs(stats1)
         addSynthetics(stats1)
       }
     }
