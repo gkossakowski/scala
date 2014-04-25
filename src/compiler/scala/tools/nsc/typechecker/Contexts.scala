@@ -97,9 +97,20 @@ trait Contexts { self: Analyzer =>
     else RootImports.completeList
   }
 
+  private def rootContext(rootImports: List[Symbol]): Context = {
+    (startContext /: rootImports)((c, sym) => c.make(gen.mkWildcardImport(sym)))
+  }
+  lazy val rootImportsContextJavaList =  rootContext(RootImports.javaList)
+  lazy val rootImportsContextCompleteList =  rootContext(RootImports.completeList)
 
   def rootContext(unit: CompilationUnit, tree: Tree = EmptyTree, erasedTypes: Boolean = false): Context = {
-    val rootImportsContext = (startContext /: rootImports(unit))((c, sym) => c.make(gen.mkWildcardImport(sym)))
+    val rootImportsForUnit = rootImports(unit)
+    val rootImportsContext = if (rootImportsForUnit eq RootImports.completeList)
+      rootImportsContextCompleteList
+    else if (rootImportsForUnit eq RootImports.javaList)
+      rootImportsContextJavaList
+    else (startContext /: rootImportsForUnit)((c, sym) => c.make(gen.mkWildcardImport(sym)))
+
 
     // there must be a scala.xml package when xml literals were parsed in this unit
     if (unit.hasXml && ScalaXmlPackage == NoSymbol)
