@@ -3099,7 +3099,36 @@ trait Typers extends Adaptations with Tags with TypersTracking with PatternTyper
         }
       }
 
-      val stats1 = stats mapConserve typedStat
+      val stats1 = {
+        def mapConserve(stats: List[Tree]): List[Tree] = {
+              @scala.annotation.tailrec
+        def loop(mapped: ListBuffer[Tree], unchanged: List[Tree], pending: List[Tree]): List[Tree] =
+          if (pending.isEmpty) {
+            if (mapped eq null) unchanged
+            else mapped.prependToList(unchanged)
+          }
+          else {
+            val head0 = pending.head
+            val head1 = typedStat(head0)
+
+            if (head1 eq head0)
+              loop(mapped, unchanged, pending.tail)
+            else {
+              val b = if (mapped eq null) new ListBuffer[Tree] else mapped
+              var xc = unchanged
+              while (xc ne pending) {
+                b += xc.head
+                xc = xc.tail
+              }
+              b += head1
+              val tail0 = pending.tail
+              loop(b, tail0, tail0)
+            }
+          }
+          loop(null, stats, stats)
+        }
+        mapConserve(stats)
+      }
       if (phase.erasedTypes) stats1
       else {
         checkNoDoubleDefs(stats1)
