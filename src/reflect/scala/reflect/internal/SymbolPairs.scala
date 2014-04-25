@@ -185,7 +185,7 @@ abstract class SymbolPairs {
           fillDecls(bcs.tail, deferred)
           var e = bcs.head.info.decls.elems
           while (e ne null) {
-            if (e.sym.initialize.isDeferred == deferred && !exclude(e.sym))
+            if (e.sym.isDeferred == deferred && !exclude(e.sym))
               decls enter e.sym
             e = e.next
           }
