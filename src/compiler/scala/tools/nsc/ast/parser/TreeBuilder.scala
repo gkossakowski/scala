@@ -26,7 +26,7 @@ abstract class TreeBuilder {
 
   def rootScalaDot(name: Name) = gen.rootScalaDot(name)
   def scalaDot(name: Name)     = gen.scalaDot(name)
-  def scalaAnyRefConstr        = scalaDot(tpnme.AnyRef)
+  def scalaAnyRefConstr        = scalaDot(tpnme.AnyRef).setSymbol(definitions.AnyRefClass).setType(definitions.AnyRefTpe)
   def scalaUnitConstr          = scalaDot(tpnme.Unit)
 
   def convertToTypeName(t: Tree) = gen.convertToTypeName(t)

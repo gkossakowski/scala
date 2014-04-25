@@ -16,7 +16,7 @@ abstract class TreeGen {
   def rootScalaDot(name: Name)       = Select(rootId(nme.scala_) setSymbol ScalaPackage, name)
   def scalaDot(name: Name)           = Select(Ident(nme.scala_) setSymbol ScalaPackage, name)
   def scalaAnnotationDot(name: Name) = Select(scalaDot(nme.annotation), name)
-  def scalaAnyRefConstr              = scalaDot(tpnme.AnyRef) // used in ide
+  def scalaAnyRefConstr              = scalaDot(tpnme.AnyRef).setSymbol(definitions.AnyRefClass).setType(definitions.AnyRefTpe) // used in ide
 
   def scalaFunctionConstr(argtpes: List[Tree], restpe: Tree, abstractFun: Boolean = false): Tree = {
     val cls = if (abstractFun)
