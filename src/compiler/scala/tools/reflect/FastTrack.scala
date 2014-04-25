@@ -10,9 +10,9 @@ import scala.tools.reflect.quasiquotes.{ Quasiquotes => QuasiquoteImpls }
 /** Optimizes system macro expansions by hardwiring them directly to their implementations
  *  bypassing standard reflective load and invoke to avoid the overhead of Java/Scala reflection.
  */
-trait FastTrack {
-  self: Macros with Analyzer =>
+class FastTrack[MacrosAndAnalyzer <: Macros with Analyzer](val macros: MacrosAndAnalyzer) {
 
+  import macros._
   import global._
   import definitions._
   import scala.language.implicitConversions
@@ -39,7 +39,6 @@ trait FastTrack {
   }
 
   /** A map from a set of pre-established macro symbols to their implementations. */
-  def fastTrack: Map[Symbol, FastTrackEntry] = fastTrackCache()
   private val fastTrackCache = perRunCaches.newGeneric[Map[Symbol, FastTrackEntry]] {
     val runDefinitions = currentRun.runDefinitions
     import runDefinitions._
@@ -54,4 +53,5 @@ trait FastTrack {
       makeWhitebox(QuasiquoteClass_api_unapply) { case _                                          => _.expandQuasiquote }
     )
   }
+  val cache: Map[Symbol, FastTrackEntry] = fastTrackCache()
 }

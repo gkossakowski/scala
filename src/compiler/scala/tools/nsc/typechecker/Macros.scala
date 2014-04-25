@@ -42,13 +42,15 @@ import Fingerprint._
  *    (Expr(elems))
  *    (TypeTag(Int))
  */
-trait Macros extends FastTrack with MacroRuntimes with Traces with Helpers {
+trait Macros extends MacroRuntimes with Traces with Helpers {
   self: Analyzer =>
 
   import global._
   import definitions._
   import treeInfo.{isRepeatedParamType => _, _}
   import MacrosStats._
+
+  lazy val fastTrack = new FastTrack[self.type](self)
 
   def globalSettings = global.settings
 
@@ -262,7 +264,7 @@ trait Macros extends FastTrack with MacroRuntimes with Traces with Helpers {
 
   def isBlackbox(expandee: Tree): Boolean = isBlackbox(dissectApplied(expandee).core.symbol)
   def isBlackbox(macroDef: Symbol): Boolean = {
-    val fastTrackBoxity = fastTrack.get(macroDef).map(_.isBlackbox)
+    val fastTrackBoxity = fastTrack.cache.get(macroDef).map(_.isBlackbox)
     val bindingBoxity = loadMacroImplBinding(macroDef).map(_.isBlackbox)
     fastTrackBoxity orElse bindingBoxity getOrElse false
   }
@@ -326,7 +328,7 @@ trait Macros extends FastTrack with MacroRuntimes with Traces with Helpers {
     assert(macroDef.isMacro, macroDdef)
 
     macroLogVerbose("typechecking macro def %s at %s".format(macroDef, macroDdef.pos))
-    if (fastTrack contains macroDef) {
+    if (fastTrack.cache contains macroDef) {
       macroLogVerbose("typecheck terminated unexpectedly: macro is fast track")
       assert(!macroDdef.tpt.isEmpty, "fast track macros must provide result type")
       EmptyTree
@@ -391,9 +393,9 @@ trait Macros extends FastTrack with MacroRuntimes with Traces with Helpers {
     if (paramss.length > argss.length && !isNullaryArgsEmptyParams) MacroTooFewArgumentListsError(expandee)
 
     val macroImplArgs: List[Any] =
-      if (fastTrack contains macroDef) {
+      if (fastTrack.cache contains macroDef) {
         // Take a dry run of the fast track implementation
-        if (fastTrack(macroDef) validate expandee) argss.flatten
+        if (fastTrack.cache(macroDef) validate expandee) argss.flatten
         else MacroTooFewArgumentListsError(expandee)
       }
       else {

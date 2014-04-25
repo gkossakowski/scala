@@ -28,9 +28,9 @@ trait MacroRuntimes extends JavaReflectionRuntimes {
   def standardMacroRuntime(expandee: Tree): MacroRuntime = {
     val macroDef = expandee.symbol
     macroLogVerbose(s"looking for macro implementation: $macroDef")
-    if (fastTrack contains macroDef) {
+    if (fastTrack.cache contains macroDef) {
       macroLogVerbose("macro expansion is serviced by a fast track")
-      fastTrack(macroDef)
+      fastTrack.cache(macroDef)
     } else {
       macroRuntimesCache.getOrElseUpdate(macroDef, new MacroRuntimeResolver(macroDef).resolveRuntime())
     }
