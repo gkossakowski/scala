@@ -43,15 +43,18 @@ trait Scopes extends api.Scopes { self: SymbolTable =>
   object Scope {
     def unapplySeq(decls: Scope): Some[Seq[Symbol]] = Some(decls.toList)
   }
+  
+  import scala.collection.mutable.ArrayBuffer
+  val elemsBuffer: ArrayBuffer[ScopeEntry] = ArrayBuffer.empty
 
   /** Note: constructor is protected to force everyone to use the factory methods newScope or newNestedScope instead.
    *  This is necessary because when run from reflection every scope needs to have a
    *  SynchronizedScope as mixin.
    */
-  class Scope protected[Scopes] (initElems: ScopeEntry = null, initFingerPrints: Long = 0L) extends ScopeApi with MemberScopeApi {
+  class Scope protected[Scopes] (initElems: ScopeEntry = null, initFingerPrints: Long = 0L, private var hashtable: Array[ScopeEntry] = null) extends ScopeApi with MemberScopeApi {
 
     protected[Scopes] def this(base: Scope) = {
-      this(base.elems)
+      this(base.elems, 0L, base.hashtable)
       nestinglevel = base.nestinglevel + 1
     }
 
@@ -63,7 +66,7 @@ trait Scopes extends api.Scopes { self: SymbolTable =>
 
     /** the hash table
      */
-    private var hashtable: Array[ScopeEntry] = null
+    
 
     /** a cache for all elements, to be used by symbol iterator.
      */
@@ -77,14 +80,14 @@ trait Scopes extends api.Scopes { self: SymbolTable =>
     /** size and mask of hash tables
      *  todo: make hashtables grow?
      */
-    private val HASHSIZE = 0x80
-    private val HASHMASK = 0x7f
+    private val HASHSIZE = 0x400
+    private val HASHMASK = 0x3ff
 
     /** the threshold number of entries from which a hashtable is constructed.
      */
     private val MIN_HASH = 8
 
-    if (size >= MIN_HASH) createHash()
+    if (size >= MIN_HASH && (hashtable eq null)) createHash()
 
     /** Returns a new scope with the same content as this one. */
     def cloneScope: Scope = newScopeWith(this.toList: _*)
@@ -156,13 +159,19 @@ trait Scopes extends api.Scopes { self: SymbolTable =>
           enterAllInHash(e.next, n + 1)
           enterInHash(e)
         } else {
-          var entries: List[ScopeEntry] = List()
+          //var entries: List[ScopeEntry] = List()
           var ee = e
           while (ee ne null) {
-            entries = ee :: entries
+            elemsBuffer += ee
             ee = ee.next
           }
-          entries foreach enterInHash
+          var i = elemsBuffer.size-1
+          while (i >= 0) {
+            enterInHash(elemsBuffer(i))
+            i -= 1
+          }
+          elemsBuffer.clear()
+          //entries foreach enterInHash
         }
       }
     }
@@ -465,5 +474,5 @@ trait Scopes extends api.Scopes { self: SymbolTable =>
    */
   class ErrorScope(owner: Symbol) extends Scope
 
-  private final val maxRecursions = 1000
+  private final val maxRecursions = 0
 }
