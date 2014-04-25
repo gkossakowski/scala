@@ -1180,7 +1180,7 @@ trait Namers extends MethodSynthesis {
         }
       }
 
-      addDefaultGetters(meth, ddef, vparamss, tparams, overriddenSymbol(methResTp))
+      //addDefaultGetters(meth, ddef, vparamss, tparams, overriddenSymbol(methResTp))
 
       // fast track macros, i.e. macros defined inside the compiler, are hardcoded
       // hence we make use of that and let them have whatever right-hand side they need
