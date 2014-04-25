@@ -16,8 +16,9 @@ private[internal] trait TypeConstraints {
   private lazy val _undoLog = new UndoLog
   def undoLog = _undoLog
 
+  final case class UndoPair(tv: TypeVar, tConstraint: TypeConstraint)
   class UndoLog extends Clearable {
-    private type UndoPairs = List[(TypeVar, TypeConstraint)]
+    type UndoPairs = List[UndoPair]
     //OPT this method is public so we can do `manual inlining`
     var log: UndoPairs = List()
     private object logSizeTracker {
@@ -50,7 +51,7 @@ private[internal] trait TypeConstraints {
     def undoTo(limit: UndoPairs) {
       assertCorrectThread()
       while ((log ne limit) && log.nonEmpty) {
-        val (tv, constr) = log.head
+        val UndoPair(tv, constr) = log.head
         tv.constr = constr
         log = log.tail
         logSizeTracker.changeLogSizeBy(-1)
@@ -62,7 +63,7 @@ private[internal] trait TypeConstraints {
       *  which is already synchronized.
       */
     private[reflect] def record(tv: TypeVar) = {
-      log ::= ((tv, tv.constr.cloneInternal))
+      log ::= UndoPair(tv, tv.constr.cloneInternal)
       logSizeTracker.changeLogSizeBy(1)
     }
 
