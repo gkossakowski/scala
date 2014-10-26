@@ -30,6 +30,8 @@ trait Mirrors extends api.Mirrors {
     val EmptyPackageClass: ClassSymbol
     val EmptyPackage: ModuleSymbol
 
+    def symbolOf[T: universe.WeakTypeTag]: universe.TypeSymbol = universe.weakTypeTag[T].in(this).tpe.typeSymbolDirect.asType
+
     def findMemberFromRoot(fullName: Name): Symbol = {
       val segs = nme.segments(fullName.toString, fullName.isTermName)
       if (segs.isEmpty) NoSymbol
@@ -96,10 +98,6 @@ trait Mirrors extends api.Mirrors {
       }
     }
 
-    @deprecated("Use getClassByName", "2.10.0")
-    def getClass(fullname: Name): ClassSymbol =
-      getClassByName(fullname)
-
     def getClassByName(fullname: Name): ClassSymbol =
       ensureClassSymbol(fullname.toString, getModuleOrClass(fullname.toTypeName))
 
@@ -121,25 +119,22 @@ trait Mirrors extends api.Mirrors {
      *  Compiler might ignore them, but they should be loadable with macros.
      */
     override def staticClass(fullname: String): ClassSymbol =
-      ensureClassSymbol(fullname, staticModuleOrClass(newTypeNameCached(fullname)))
+      try ensureClassSymbol(fullname, staticModuleOrClass(newTypeNameCached(fullname)))
+      catch { case mre: MissingRequirementError => throw new ScalaReflectionException(mre.msg) }
 
     /************************ loaders of module symbols ************************/
 
     private def ensureModuleSymbol(fullname: String, sym: Symbol, allowPackages: Boolean): ModuleSymbol =
       sym match {
-        case x: ModuleSymbol if allowPackages || !x.isPackage => x
-        case _                                                => MissingRequirementError.notFound("object " + fullname)
+        case x: ModuleSymbol if allowPackages || !x.hasPackageFlag => x
+        case _                                                     => MissingRequirementError.notFound("object " + fullname)
       }
-
-    @deprecated("Use getModuleByName", "2.10.0")
-    def getModule(fullname: Name): ModuleSymbol =
-      getModuleByName(fullname)
 
     def getModuleByName(fullname: Name): ModuleSymbol =
       ensureModuleSymbol(fullname.toString, getModuleOrClass(fullname.toTermName), allowPackages = true)
 
     def getRequiredModule(fullname: String): ModuleSymbol =
-      getModule(newTermNameCached(fullname))
+      getModuleByName(newTermNameCached(fullname))
 
     // TODO: What syntax do we think should work here? Say you have an object
     // like scala.Predef.  You can't say requiredModule[scala.Predef] since there's
@@ -155,7 +150,7 @@ trait Mirrors extends api.Mirrors {
       getModuleIfDefined(newTermNameCached(fullname))
 
     def getModuleIfDefined(fullname: Name): Symbol =
-      wrapMissing(getModule(fullname.toTermName))
+      wrapMissing(getModuleByName(fullname.toTermName))
 
     /** @inheritdoc
      *
@@ -163,14 +158,15 @@ trait Mirrors extends api.Mirrors {
      *  Compiler might ignore them, but they should be loadable with macros.
      */
     override def staticModule(fullname: String): ModuleSymbol =
-      ensureModuleSymbol(fullname, staticModuleOrClass(newTermNameCached(fullname)), allowPackages = false)
+      try ensureModuleSymbol(fullname, staticModuleOrClass(newTermNameCached(fullname)), allowPackages = false)
+      catch { case mre: MissingRequirementError => throw new ScalaReflectionException(mre.msg) }
 
     /************************ loaders of package symbols ************************/
 
     private def ensurePackageSymbol(fullname: String, sym: Symbol, allowModules: Boolean): ModuleSymbol =
       sym match {
-        case x: ModuleSymbol if allowModules || x.isPackage => x
-        case _                                              => MissingRequirementError.notFound("package " + fullname)
+        case x: ModuleSymbol if allowModules || x.hasPackageFlag => x
+        case _                                                   => MissingRequirementError.notFound("package " + fullname)
       }
 
     def getPackage(fullname: TermName): ModuleSymbol =
@@ -195,8 +191,18 @@ trait Mirrors extends api.Mirrors {
     def getPackageObjectIfDefined(fullname: TermName): Symbol =
       wrapMissing(getPackageObject(fullname))
 
+    final def getPackageObjectWithMember(pre: Type, sym: Symbol): Symbol = {
+      // The owner of a symbol which requires package qualification may be the
+      // package object iself, but it also could be any superclass of the package
+      // object.  In the latter case, we must go through the qualifier's info
+      // to obtain the right symbol.
+      if (sym.owner.isModuleClass) sym.owner.sourceModule // fast path, if the member is owned by a module class, that must be linked to the package object
+      else pre member nme.PACKAGE                         // otherwise we have to findMember
+    }
+
     override def staticPackage(fullname: String): ModuleSymbol =
-      ensurePackageSymbol(fullname.toString, getModuleOrClass(newTermNameCached(fullname)), allowModules = false)
+      try ensurePackageSymbol(fullname.toString, getModuleOrClass(newTermNameCached(fullname)), allowModules = false)
+      catch { case mre: MissingRequirementError => throw new ScalaReflectionException(mre.msg) }
 
     /************************ helpers ************************/
 
@@ -250,6 +256,19 @@ trait Mirrors extends api.Mirrors {
       RootClass.info.decls enter EmptyPackage
       RootClass.info.decls enter RootPackage
 
+      if (rootOwner != NoSymbol) {
+        // synthetic core classes are only present in root mirrors
+        // because Definitions.scala, which initializes and enters them, only affects rootMirror
+        // therefore we need to enter them manually for non-root mirrors
+        definitions.syntheticCoreClasses foreach (theirSym => {
+          val theirOwner = theirSym.owner
+          assert(theirOwner.isPackageClass, s"theirSym = $theirSym, theirOwner = $theirOwner")
+          val ourOwner = staticPackage(theirOwner.fullName).moduleClass
+          val ourSym = theirSym // just copy the symbol into our branch of the symbol table
+          ourOwner.info.decls enterIfNew ourSym
+        })
+      }
+
       initialized = true
     }
   }
@@ -274,34 +293,46 @@ trait Mirrors extends api.Mirrors {
       def mirror                      = thisMirror.asInstanceOf[Mirror]
     }
 
-    // This is the package _root_.  The actual root cannot be referenced at
-    // the source level, but _root_ is essentially a function => <root>.
-    final object RootPackage extends ModuleSymbol(rootOwner, NoPosition, nme.ROOTPKG) with RootSymbol {
+    class RootPackage extends ModuleSymbol(rootOwner, NoPosition, nme.ROOTPKG) with RootSymbol {
       this setInfo NullaryMethodType(RootClass.tpe)
-      RootClass.sourceModule = this
 
       override def isRootPackage = true
     }
+
+    // This is the package _root_.  The actual root cannot be referenced at
+    // the source level, but _root_ is essentially a function => <root>.
+    lazy val RootPackage = new RootPackage
+
+    class RootClass extends PackageClassSymbol(rootOwner, NoPosition, tpnme.ROOT) with RootSymbol {
+      this setInfo rootLoader
+
+      override def isRoot            = true
+      override def isEffectiveRoot   = true
+      override def isNestedClass     = false
+      override def sourceModule      = RootPackage
+    }
+
     // This is <root>, the actual root of everything except the package _root_.
     // <root> and _root_ (RootPackage and RootClass) should be the only "well known"
     // symbols owned by NoSymbol.  All owner chains should go through RootClass,
     // although it is probable that some symbols are created as direct children
     // of NoSymbol to ensure they will not be stumbled upon.  (We should designate
     // a better encapsulated place for that.)
-    final object RootClass extends PackageClassSymbol(rootOwner, NoPosition, tpnme.ROOT) with RootSymbol {
-      this setInfo rootLoader
+    lazy val RootClass = new RootClass
 
-      override def isRoot            = true
-      override def isEffectiveRoot   = true
-      override def isNestedClass     = false
-    }
-    // The empty package, which holds all top level types without given packages.
-    final object EmptyPackage extends ModuleSymbol(RootClass, NoPosition, nme.EMPTY_PACKAGE_NAME) with WellKnownSymbol {
+    class EmptyPackage extends ModuleSymbol(RootClass, NoPosition, nme.EMPTY_PACKAGE_NAME) with WellKnownSymbol {
       override def isEmptyPackage = true
     }
-    final object EmptyPackageClass extends PackageClassSymbol(RootClass, NoPosition, tpnme.EMPTY_PACKAGE_NAME) with WellKnownSymbol {
+
+    // The empty package, which holds all top level types without given packages.
+    lazy val EmptyPackage = new EmptyPackage
+
+    class EmptyPackageClass extends PackageClassSymbol(RootClass, NoPosition, tpnme.EMPTY_PACKAGE_NAME) with WellKnownSymbol {
       override def isEffectiveRoot     = true
       override def isEmptyPackageClass = true
+      override def sourceModule        = EmptyPackage
     }
+
+    lazy val EmptyPackageClass = new EmptyPackageClass
   }
 }

@@ -27,6 +27,16 @@ trait ContextErrors {
     override def toString() = "[Type error at:" + errPos + "] " + errMsg
   }
 
+  abstract class AbsAmbiguousTypeError extends AbsTypeError
+
+  case class AmbiguousTypeError(errPos: Position, errMsg: String)
+    extends AbsAmbiguousTypeError
+
+  case class AmbiguousImplicitTypeError(underlyingTree: Tree, errMsg: String)
+    extends AbsAmbiguousTypeError {
+    def errPos = underlyingTree.pos
+  }
+
   sealed abstract class TreeTypeError extends AbsTypeError {
     def underlyingTree: Tree
     def errPos = underlyingTree.pos
@@ -37,9 +47,6 @@ trait ContextErrors {
 
   case class AccessTypeError(underlyingTree: Tree, errMsg: String)
     extends TreeTypeError
-
-  case class AmbiguousTypeError(errPos: Position, errMsg: String)
-    extends AbsTypeError
 
   case class SymbolTypeError(underlyingSym: Symbol, errMsg: String)
     extends AbsTypeError {
@@ -75,8 +82,6 @@ trait ContextErrors {
       s"diverging implicit expansion for type ${pt}\nstarting with ${sym.fullLocationString}"
   }
 
-  case class AmbiguousImplicitTypeError(underlyingTree: Tree, errMsg: String)
-    extends TreeTypeError
 
   case class PosAndMsgTypeError(errPos: Position, errMsg: String)
     extends AbsTypeError
@@ -88,10 +93,6 @@ trait ContextErrors {
 
     def issueSymbolTypeError(sym: Symbol, msg: String)(implicit context: Context) {
       issueTypeError(SymbolTypeError(sym, msg))
-    }
-
-    def issueAmbiguousTypeError(pre: Type, sym1: Symbol, sym2: Symbol, err: AmbiguousTypeError)(implicit context: Context) {
-      context.issueAmbiguousError(pre, sym1, sym2, err)
     }
 
     def issueTypeError(err: AbsTypeError)(implicit context: Context) { context.issue(err) }
@@ -123,6 +124,36 @@ trait ContextErrors {
 
   import ErrorUtils._
 
+  private def MacroIncompatibleEngineError(friendlyMessage: String, internalMessage: String) = {
+    def debugDiagnostic = s"(internal diagnostic: $internalMessage)"
+    val message = if (macroDebugLite || macroDebugVerbose) s"$friendlyMessage $debugDiagnostic" else friendlyMessage
+    // TODO: clean this up! (This is a more explicit version of what the code use to do, to reveal the issue.)
+    throw new TypeError(analyzer.lastTreeToTyper.pos, message)
+  }
+
+  def MacroCantExpand210xMacrosError(internalMessage: String) =
+    MacroIncompatibleEngineError("can't expand macros compiled by previous versions of Scala", internalMessage)
+
+  def MacroCantExpandIncompatibleMacrosError(internalMessage: String) =
+    MacroIncompatibleEngineError("macro cannot be expanded, because it was compiled by an incompatible macro engine", internalMessage)
+
+  def NoImplicitFoundError(tree: Tree, param: Symbol)(implicit context: Context): Unit = {
+    def errMsg = {
+      val paramName = param.name
+      val paramTp = param.tpe
+      def evOrParam = (
+        if (paramName startsWith nme.EVIDENCE_PARAM_PREFIX)
+          "evidence parameter of type"
+        else
+          s"parameter $paramName:")
+      paramTp.typeSymbolDirect match {
+        case ImplicitNotFoundMsg(msg) => msg.format(paramName, paramTp)
+        case _ => s"could not find implicit value for $evOrParam $paramTp"
+      }
+    }
+    issueNormalTypeError(tree, errMsg)
+  }
+
   trait TyperContextErrors {
     self: Typer =>
 
@@ -141,22 +172,17 @@ trait ContextErrors {
         setError(tree)
       }
 
-      def NoImplicitFoundError(tree: Tree, param: Symbol) = {
-        def errMsg = {
-          val paramName = param.name
-          val paramTp   = param.tpe
-          paramTp.typeSymbolDirect match {
-              case ImplicitNotFoundMsg(msg) => msg.format(paramName, paramTp)
-              case _ =>
-                "could not find implicit value for "+
-                   (if (paramName startsWith nme.EVIDENCE_PARAM_PREFIX) "evidence parameter of type "
-                    else "parameter "+paramName+": ")+paramTp
-          }
-        }
-        issueNormalTypeError(tree, errMsg)
-      }
-
       def AdaptTypeError(tree: Tree, found: Type, req: Type) = {
+        // SI-3971 unwrapping to the outermost Apply helps prevent confusion with the
+        // error message point.
+        def callee = {
+          def unwrap(t: Tree): Tree = t match {
+            case Apply(app: Apply, _) => unwrap(app)
+            case _                    => t
+          }
+          unwrap(tree)
+        }
+
         // If the expected type is a refinement type, and the found type is a refinement or an anon
         // class, we can greatly improve the error message by retyping the tree to recover the actual
         // members present, then display along with the expected members. This is done here because
@@ -181,7 +207,7 @@ trait ContextErrors {
         }
         assert(!foundType.isErroneous && !req.isErroneous, (foundType, req))
 
-        issueNormalTypeError(tree, withAddendum(tree.pos)(typeErrorMsg(foundType, req)))
+        issueNormalTypeError(callee, withAddendum(callee.pos)(typeErrorMsg(foundType, req)))
         infer.explainTypes(foundType, req)
       }
 
@@ -346,6 +372,14 @@ trait ContextErrors {
         //setError(sel)
       }
 
+      def SelectWithUnderlyingError(sel: Tree, err: AbsTypeError) = {
+        // if there's no position, this is likely the result of a MissingRequirementError
+        // use the position of the selection we failed to type check to report the original message
+        if (err.errPos == NoPosition) issueNormalTypeError(sel, err.errMsg)
+        else issueTypeError(err)
+        setError(sel)
+      }
+
       //typedNew
       def IsAbstractError(tree: Tree, sym: Symbol) = {
         issueNormalTypeError(tree, sym + " is abstract; cannot be instantiated")
@@ -395,11 +429,28 @@ trait ContextErrors {
         setError(tree)
       }
 
-      def MissingParameterTypeError(fun: Tree, vparam: ValDef, pt: Type) =
+      def MissingParameterTypeError(fun: Tree, vparam: ValDef, pt: Type, withTupleAddendum: Boolean) = {
+        def issue(what: String) = {
+          val addendum: String = fun match {
+            case Function(params, _) if withTupleAddendum =>
+              val funArity = params.length
+              val example = analyzer.exampleTuplePattern(params map (_.name))
+              (pt baseType FunctionClass(1)) match {
+                case TypeRef(_, _, arg :: _) if arg.typeSymbol == TupleClass(funArity) && funArity > 1 =>
+                  sm"""|
+                       |Note: The expected type requires a one-argument function accepting a $funArity-Tuple.
+                       |      Consider a pattern matching anonymous function, `{ case $example =>  ... }`"""
+                case _ => ""
+              }
+            case _ => ""
+          }
+          issueNormalTypeError(vparam, what + addendum)
+        }
         if (vparam.mods.isSynthetic) fun match {
           case Function(_, Match(_, _)) => MissingParameterTypeAnonMatchError(vparam, pt)
-          case _                        => issueNormalTypeError(vparam, "missing parameter type for expanded function " + fun)
-        } else issueNormalTypeError(vparam, "missing parameter type")
+          case _                        => issue("missing parameter type for expanded function " + fun)
+        } else issue("missing parameter type")
+      }
 
       def MissingParameterTypeAnonMatchError(vparam: Tree, pt: Type) =
         issueNormalTypeError(vparam, "missing parameter type for expanded function\n"+
@@ -428,9 +479,6 @@ trait ContextErrors {
 
       def ArrayConstantsTypeMismatchError(tree: Tree, pt: Type) =
         NormalTypeError(tree, "found array constant, expected argument of type " + pt)
-
-      def UnexpectedTreeAnnotation(tree: Tree) =
-        NormalTypeError(tree, "unexpected tree in annotation: "+ tree)
 
       def AnnotationTypeMismatchError(tree: Tree, expected: Type, found: Type) =
         NormalTypeError(tree, "expected annotation of type " + expected + ", found " + found)
@@ -517,6 +565,9 @@ trait ContextErrors {
       def TooManyArgsPatternError(fun: Tree) =
         NormalTypeError(fun, "too many arguments for unapply pattern, maximum = "+definitions.MaxTupleArity)
 
+      def BlackboxExtractorExpansion(fun: Tree) =
+        NormalTypeError(fun, "extractor macros can only be whitebox")
+
       def WrongShapeExtractorExpansion(fun: Tree) =
         NormalTypeError(fun, "extractor macros can only expand into extractor calls")
 
@@ -595,8 +646,7 @@ trait ContextErrors {
         setError(tree)
       }
 
-      def CaseClassConstructorError(tree: Tree) = {
-        val baseMessage = tree.symbol + " is not a case class constructor, nor does it have an unapply/unapplySeq method"
+      def CaseClassConstructorError(tree: Tree, baseMessage: String) = {
         val addendum = directUnapplyMember(tree.symbol.info) match {
           case sym if hasMultipleNonImplicitParamLists(sym) => s"\nNote: ${sym.defString} exists in ${tree.symbol}, but it cannot be used as an extractor due to its second non-implicit parameter list"
           case _                                            => ""
@@ -696,9 +746,6 @@ trait ContextErrors {
         NormalTypeError(expandee, "too many argument lists for " + fun)
       }
 
-      def MacroInvalidExpansionError(expandee: Tree, role: String, allowedExpansions: String) = {
-        issueNormalTypeError(expandee, s"macro in $role role can only expand into $allowedExpansions")
-      }
 
       case object MacroExpansionException extends Exception with scala.util.control.ControlThrowable
 
@@ -838,20 +885,31 @@ trait ContextErrors {
         val WrongNumber, NoParams, ArgsDoNotConform = Value
       }
 
-      private def ambiguousErrorMsgPos(pos: Position, pre: Type, sym1: Symbol, sym2: Symbol, rest: String) =
-        if (sym1.hasDefault && sym2.hasDefault && sym1.enclClass == sym2.enclClass) {
-          val methodName = nme.defaultGetterToMethod(sym1.name)
-          (sym1.enclClass.pos,
-           "in "+ sym1.enclClass +", multiple overloaded alternatives of " + methodName +
-                     " define default arguments")
-        } else {
-          (pos,
-            ("ambiguous reference to overloaded definition,\n" +
-             "both " + sym1 + sym1.locationString + " of type " + pre.memberType(sym1) +
-             "\nand  " + sym2 + sym2.locationString + " of type " + pre.memberType(sym2) +
-             "\nmatch " + rest)
-          )
-        }
+      private def issueAmbiguousTypeErrorUnlessErroneous(pos: Position, pre: Type, sym1: Symbol, sym2: Symbol, rest: String): Unit = {
+        // To avoid stack overflows (SI-8890), we MUST (at least) report when either `validTargets` OR `ambiguousSuppressed`
+        // More details:
+        // If `!context.ambiguousErrors`, `reporter.issueAmbiguousError` (which `context.issueAmbiguousError` forwards to)
+        // buffers ambiguous errors. In this case, to avoid looping, we must issue even if `!validTargets`. (TODO: why?)
+        // When not buffering (and thus reporting to the user), we shouldn't issue unless `validTargets`,
+        // otherwise we report two different errors that trace back to the same root cause,
+        // and unless `validTargets`, we don't know for sure the ambiguity is real anyway.
+        val validTargets = !(pre.isErroneous || sym1.isErroneous || sym2.isErroneous)
+        val ambiguousBuffered = !context.ambiguousErrors
+        if (validTargets || ambiguousBuffered)
+          context.issueAmbiguousError(
+            if (sym1.hasDefault && sym2.hasDefault && sym1.enclClass == sym2.enclClass) {
+              val methodName = nme.defaultGetterToMethod(sym1.name)
+              AmbiguousTypeError(sym1.enclClass.pos,
+                s"in ${sym1.enclClass}, multiple overloaded alternatives of $methodName define default arguments")
+
+            } else {
+              AmbiguousTypeError(pos,
+                 "ambiguous reference to overloaded definition,\n" +
+                s"both ${sym1.fullLocationString} of type ${pre.memberType(sym1)}\n" +
+                s"and  ${sym2.fullLocationString} of type ${pre.memberType(sym2)}\n" +
+                s"match $rest")
+            })
+      }
 
       def AccessError(tree: Tree, sym: Symbol, ctx: Context, explanation: String): AbsTypeError =
         AccessError(tree, sym, ctx.enclClass.owner.thisType, ctx.enclClass.owner, explanation)
@@ -907,8 +965,7 @@ trait ContextErrors {
           val msg0 =
             "argument types " + argtpes.mkString("(", ",", ")") +
            (if (pt == WildcardType) "" else " and expected result type " + pt)
-          val (pos, msg) = ambiguousErrorMsgPos(tree.pos, pre, best, firstCompeting, msg0)
-          issueAmbiguousTypeError(pre, best, firstCompeting, AmbiguousTypeError(pos, msg))
+          issueAmbiguousTypeErrorUnlessErroneous(tree.pos, pre, best, firstCompeting, msg0)
           setErrorOnLastTry(lastTry, tree)
         } else setError(tree) // do not even try further attempts because they should all fail
                               // even if this is not the last attempt (because of the SO's possibility on the horizon)
@@ -921,8 +978,7 @@ trait ContextErrors {
       }
 
       def AmbiguousExprAlternativeError(tree: Tree, pre: Type, best: Symbol, firstCompeting: Symbol, pt: Type, lastTry: Boolean) = {
-        val (pos, msg) = ambiguousErrorMsgPos(tree.pos, pre, best, firstCompeting, "expected type " + pt)
-        issueAmbiguousTypeError(pre, best, firstCompeting, AmbiguousTypeError(pos, msg))
+        issueAmbiguousTypeErrorUnlessErroneous(tree.pos, pre, best, firstCompeting, "expected type " + pt)
         setErrorOnLastTry(lastTry, tree)
       }
 
@@ -1231,7 +1287,7 @@ trait ContextErrors {
 
     def DoubleParamNamesDefaultError(arg: Tree, name: Name, pos: Int, otherName: Option[Name])(implicit context: Context) = {
       val annex = otherName match {
-        case Some(oName) => "\nNote that that '"+ oName +"' is not a parameter name of the invoked method."
+        case Some(oName) => "\nNote that '"+ oName +"' is not a parameter name of the invoked method."
         case None => ""
       }
       issueNormalTypeError(arg, "parameter '"+ name +"' is already specified at parameter position "+ pos + annex)

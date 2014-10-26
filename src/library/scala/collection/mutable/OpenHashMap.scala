@@ -17,7 +17,6 @@ package mutable
  *  @since 2.7
  */
 object OpenHashMap {
-  import generic.BitOperations.Int.highestOneBit
 
   def apply[K, V](elems : (K, V)*) = new OpenHashMap[K, V] ++= elems
   def empty[K, V] = new OpenHashMap[K, V]
@@ -27,7 +26,7 @@ object OpenHashMap {
                                             var value: Option[Value])
                 extends HashEntry[Key, OpenEntry[Key, Value]]
 
-  private[mutable] def nextPowerOfTwo(i : Int) = highestOneBit(i) << 1
+  private[mutable] def nextPositivePowerOfTwo(i : Int) = 1 << (32 - Integer.numberOfLeadingZeros(i - 1))
 }
 
 /** A mutable hash map based on an open hashing scheme. The precise scheme is
@@ -62,7 +61,7 @@ extends AbstractMap[Key, Value]
 
   override def empty: OpenHashMap[Key, Value] = OpenHashMap.empty[Key, Value]
 
-  private[this] val actualInitialSize = OpenHashMap.nextPowerOfTwo(initialSize)
+  private[this] val actualInitialSize = OpenHashMap.nextPositivePowerOfTwo(initialSize)
 
   private var mask = actualInitialSize - 1
   private var table : Array[Entry] = new Array[Entry](actualInitialSize)
@@ -117,7 +116,10 @@ extends AbstractMap[Key, Value]
     put(key, hashOf(key), value)
   }
 
+  @deprecatedOverriding("+= should not be overridden in order to maintain consistency with put.", "2.11.0")
   def += (kv: (Key, Value)): this.type = { put(kv._1, kv._2); this }
+  
+  @deprecatedOverriding("-= should not be overridden in order to maintain consistency with remove.", "2.11.0")
   def -= (key: Key): this.type = { remove(key); this }
 
   override def put(key: Key, value: Value): Option[Value] =

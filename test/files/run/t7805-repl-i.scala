@@ -34,8 +34,8 @@ trait HangingRepl extends ReplTest {
   import scala.concurrent.duration._
   import ExecutionContext.Implicits._
   import Resulting._
-  def timeout = 15 seconds
-  def hanging[A](a: =>A): A = future(a) resultWithin timeout
+  def timeout = 120 seconds
+  def hanging[A](a: =>A): A = Future(a) resultWithin timeout
   override def show() = Try(hanging(super.show())) recover {
     case e => e.printStackTrace()
   }

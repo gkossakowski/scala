@@ -37,7 +37,7 @@ abstract class TreeGen extends scala.reflect.internal.TreeGen with TreeDSL {
       NoSymbol
         newImport NoPosition
           setFlag SYNTHETIC
-          setInfo analyzer.ImportType(qual)
+          setInfo ImportType(qual)
     )
     val importTree = (
       Import(qual, selector)
@@ -51,13 +51,6 @@ abstract class TreeGen extends scala.reflect.internal.TreeGen with TreeDSL {
   def mkSoftRef(expr: Tree): Tree = atPos(expr.pos) {
     val constructor = SoftReferenceClass.info.nonPrivateMember(nme.CONSTRUCTOR).suchThat(_.paramss.flatten.size == 1)
     NewFromConstructor(constructor, expr)
-  }
-
-  // annotate the expression with @unchecked
-  def mkUnchecked(expr: Tree): Tree = atPos(expr.pos) {
-    // This can't be "Annotated(New(UncheckedClass), expr)" because annotations
-    // are very picky about things and it crashes the compiler with "unexpected new".
-    Annotated(New(scalaDot(UncheckedClass.name), Nil), expr)
   }
 
   // Builds a tree of the form "{ lhs = rhs ; lhs  }"
@@ -149,7 +142,7 @@ abstract class TreeGen extends scala.reflect.internal.TreeGen with TreeDSL {
    *    x.asInstanceOf[`pt`]()   if after uncurry but before erasure
    *    x.$asInstanceOf[`pt`]()  if at or after erasure
    */
-  def mkCast(tree: Tree, pt: Type): Tree = {
+  override def mkCast(tree: Tree, pt: Type): Tree = {
     debuglog("casting " + tree + ":" + tree.tpe + " to " + pt + " at phase: " + phase)
     assert(!tree.tpe.isInstanceOf[MethodType], tree)
     assert(pt eq pt.normalize, tree +" : "+ debugString(pt) +" ~>"+ debugString(pt.normalize))
@@ -261,45 +254,46 @@ abstract class TreeGen extends scala.reflect.internal.TreeGen with TreeDSL {
    */
   def mkAnonymousNew(stats: List[Tree]): Tree = {
     val stats1 = if (stats.isEmpty) List(Literal(Constant(()))) else stats
-    mkNew(Nil, emptyValDef, stats1, NoPosition, NoPosition)
+    mkNew(Nil, noSelfType, stats1, NoPosition, NoPosition)
   }
 
-  /** Create positioned tree representing an object creation <new parents { stats }
-   *  @param npos  the position of the new
-   *  @param cpos  the position of the anonymous class starting with parents
+  /**
+   * Create a method based on a Function
+   *
+   * Used both to under `-Ydelambdafy:method` create a lifted function and
+   * under `-Ydelamdafy:inline` to create the apply method on the anonymous
+   * class.
+   *
+   * It creates a method definition with value params cloned from the
+   * original lambda. Then it calls a supplied function to create
+   * the body and types the result. Finally
+   * everything is wrapped up in a DefDef
+   *
+   * @param owner The owner for the new method
+   * @param name name for the new method
+   * @param additionalFlags flags to be put on the method in addition to FINAL
    */
-  def mkNew(parents: List[Tree], self: ValDef, stats: List[Tree],
-              npos: Position, cpos: Position): Tree =
-    if (parents.isEmpty)
-      mkNew(List(scalaAnyRefConstr), self, stats, npos, cpos)
-    else if (parents.tail.isEmpty && stats.isEmpty) {
-      // `Parsers.template` no longer differentiates tpts and their argss
-      // e.g. `C()` will be represented as a single tree Apply(Ident(C), Nil)
-      // instead of parents = Ident(C), argss = Nil as before
-      // this change works great for things that are actually templates
-      // but in this degenerate case we need to perform postprocessing
-      val app = treeInfo.dissectApplied(parents.head)
-      atPos(npos union cpos) { New(app.callee, app.argss) }
-    } else {
-      val x = tpnme.ANON_CLASS_NAME
-      atPos(npos union cpos) {
-        Block(
-          List(
-            atPos(cpos) {
-              ClassDef(
-                Modifiers(FINAL), x, Nil,
-                mkTemplate(parents, self, NoMods, ListOfNil, stats, cpos.focus))
-            }),
-          atPos(npos) {
-            New(
-              Ident(x) setPos npos.focus,
-              Nil)
-          }
-        )
-      }
+  def mkMethodFromFunction(localTyper: analyzer.Typer)
+                          (fun: Function, owner: Symbol, name: TermName, additionalFlags: FlagSet = NoFlags) = {
+    val funParams = fun.vparams map (_.symbol)
+    val formals :+ restpe = fun.tpe.typeArgs
+
+    val methSym = owner.newMethod(name, fun.pos, FINAL | additionalFlags)
+
+    val paramSyms = map2(formals, fun.vparams) {
+      (tp, vparam) => methSym.newSyntheticValueParam(tp, vparam.name)
     }
 
-  def mkSyntheticParam(pname: TermName) =
-    ValDef(Modifiers(PARAM | SYNTHETIC), pname, TypeTree(), EmptyTree)
+    methSym setInfo MethodType(paramSyms, restpe.deconst)
 
+    fun.body.substituteSymbols(funParams, paramSyms)
+    fun.body changeOwner (fun.symbol -> methSym)
+
+    val methDef = DefDef(methSym, fun.body)
+
+    // Have to repack the type to avoid mismatches when existentials
+    // appear in the result - see SI-4869.
+    methDef.tpt setType localTyper.packedType(fun.body, methSym).deconst
+    methDef
+  }
 }

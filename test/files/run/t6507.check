@@ -1,8 +1,6 @@
 Type in expressions to have them evaluated.
 Type :help for more information.
 
-scala> 
-
 scala> :silent
 Switched off result printing.
 
@@ -23,4 +21,4 @@ scala> res0
 !
 res1: A = A
 
-scala> 
+scala> :quit

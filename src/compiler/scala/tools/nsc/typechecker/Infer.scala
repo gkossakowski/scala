@@ -174,7 +174,8 @@ trait Infer extends Checkable {
   private lazy val stdErrorValue = stdErrorClass.newErrorValue(nme.ERROR)
 
   /** The context-dependent inferencer part */
-  class Inferencer(context: Context) extends InferencerContextErrors with InferCheckable {
+  abstract class Inferencer extends InferencerContextErrors with InferCheckable {
+    def context: Context
     import InferErrorGen._
 
     /* -- Error Messages --------------------------------------------------- */
@@ -197,8 +198,6 @@ trait Infer extends Checkable {
     }
 
     def getContext = context
-
-    def issue(err: AbsTypeError): Unit = context.issue(err)
 
     def explainTypes(tp1: Type, tp2: Type) = {
       if (context.reportErrors)
@@ -545,7 +544,14 @@ trait Infer extends Checkable {
       val targs = solvedTypes(tvars, tparams, tparams map varianceInTypes(formals), upper = false, lubDepth(formals) max lubDepth(argtpes))
       // Can warn about inferring Any/AnyVal as long as they don't appear
       // explicitly anywhere amongst the formal, argument, result, or expected type.
-      def canWarnAboutAny = !(pt :: restpe :: formals ::: argtpes exists (t => (t contains AnyClass) || (t contains AnyValClass)))
+      // ...or lower bound of a type param, since they're asking for it.
+      def canWarnAboutAny = {
+        val loBounds = tparams map (_.info.bounds.lo)
+        val hasAny = pt :: restpe :: formals ::: argtpes ::: loBounds exists (t =>
+          (t contains AnyClass) || (t contains AnyValClass)
+        )
+        !hasAny
+      }
       def argumentPosition(idx: Int): Position = context.tree match {
         case x: ValOrDefDef => x.rhs match {
           case Apply(fn, args) if idx < args.size => args(idx).pos
@@ -553,11 +559,11 @@ trait Infer extends Checkable {
         }
         case _ => context.tree.pos
       }
-      if (settings.warnInferAny.value && context.reportErrors && canWarnAboutAny) {
+      if (settings.warnInferAny && context.reportErrors && canWarnAboutAny) {
         foreachWithIndex(targs) ((targ, idx) =>
           targ.typeSymbol match {
             case sym @ (AnyClass | AnyValClass) =>
-              context.unit.warning(argumentPosition(idx), s"a type was inferred to be `${sym.name}`; this may indicate a programming error.")
+              reporter.warning(argumentPosition(idx), s"a type was inferred to be `${sym.name}`; this may indicate a programming error.")
             case _ =>
           }
         )
@@ -577,13 +583,21 @@ trait Infer extends Checkable {
      */
     private[typechecker] def isApplicableBasedOnArity(tpe: Type, argsCount: Int, varargsStar: Boolean, tuplingAllowed: Boolean): Boolean = followApply(tpe) match {
       case OverloadedType(pre, alts) =>
+        // followApply may return an OverloadedType (tpe is a value type with multiple `apply` methods)
         alts exists (alt => isApplicableBasedOnArity(pre memberType alt, argsCount, varargsStar, tuplingAllowed))
       case _ =>
         val paramsCount   = tpe.params.length
+        // simpleMatch implies we're not using defaults
         val simpleMatch   = paramsCount == argsCount
         val varargsTarget = isVarArgsList(tpe.params)
+
+        // varargsMatch implies we're not using defaults, as varargs and defaults are mutually exclusive
         def varargsMatch  = varargsTarget && (paramsCount - 1) <= argsCount
+        // another reason why auto-tupling is a bad idea: it can hide the use of defaults, so must rule those out explicitly
         def tuplingMatch  = tuplingAllowed && eligibleForTupleConversion(paramsCount, argsCount, varargsTarget)
+        // varargs and defaults are mutually exclusive, so not using defaults if `varargsTarget`
+        // we're not using defaults if there are (at least as many) arguments as parameters (not using exact match to allow for tupling)
+        def notUsingDefaults = varargsTarget || paramsCount <= argsCount
 
         // A varargs star call, e.g. (x, y:_*) can only match a varargs method
         // with the same number of parameters.  See SI-5859 for an example of what
@@ -591,10 +605,11 @@ trait Infer extends Checkable {
         if (varargsStar)
           varargsTarget && simpleMatch
         else
-          simpleMatch || varargsMatch || tuplingMatch
+          simpleMatch || varargsMatch || (tuplingMatch && notUsingDefaults)
     }
 
     private[typechecker] def followApply(tp: Type): Type = tp match {
+      case _ if tp.isError => tp // SI-8228, `ErrorType nonPrivateMember nme.apply` returns an member with an erroneous type!
       case NullaryMethodType(restp) =>
         val restp1 = followApply(restp)
         if (restp1 eq restp) tp else restp1
@@ -631,7 +646,7 @@ trait Infer extends Checkable {
           if (pos == -1) {
             if (positionalAllowed) { // treat assignment as positional argument
               argPos(index) = index
-              res = UnitTpe
+              res = UnitTpe // TODO: this is a bit optimistic, the name may not refer to a mutable variable...
             } else                   // unknown parameter name
               namesOK = false
           } else if (argPos.contains(pos)) { // parameter specified twice
@@ -771,7 +786,7 @@ trait Infer extends Checkable {
       def applicableExpectingPt(pt: Type): Boolean = {
         val silent = context.makeSilent(reportAmbiguousErrors = false)
         val result = newTyper(silent).infer.isApplicable(undetparams, ftpe, argtpes0, pt)
-        if (silent.hasErrors && !pt.isWildcard)
+        if (silent.reporter.hasErrors && !pt.isWildcard)
           applicableExpectingPt(WildcardType) // second try
         else
           result
@@ -914,11 +929,16 @@ trait Infer extends Checkable {
       def infer_s = map3(tparams, tvars, targs)((tparam, tvar, targ) => s"$tparam=$tvar/$targ") mkString ","
       printTyping(tree, s"infer expr instance from pt=$pt, $infer_s")
 
+      // SI-7899 infering by-name types is unsound. The correct behaviour is conditional because the hole is
+      //         exploited in Scalaz (Free.scala), as seen in: run/t7899-regression.
+      def dropByNameIfStrict(tp: Type): Type = if (settings.inferByName) tp else dropByName(tp)
+      def targsStrict = if (targs eq null) null else targs mapConserve dropByNameIfStrict
+
       if (keepNothings || (targs eq null)) { //@M: adjustTypeArgs fails if targs==null, neg/t0226
-        substExpr(tree, tparams, targs, pt)
+        substExpr(tree, tparams, targsStrict, pt)
         List()
       } else {
-        val AdjustedTypeArgs.Undets(okParams, okArgs, leftUndet) = adjustTypeArgs(tparams, tvars, targs)
+        val AdjustedTypeArgs.Undets(okParams, okArgs, leftUndet) = adjustTypeArgs(tparams, tvars, targsStrict)
         def solved_s = map2(okParams, okArgs)((p, a) => s"$p=$a") mkString ","
         def undet_s = leftUndet match {
           case Nil => ""
@@ -1251,33 +1271,36 @@ trait Infer extends Checkable {
      *  If no alternative matches `pt`, take the parameterless one anyway.
      */
     def inferExprAlternative(tree: Tree, pt: Type): Tree = {
-      def tryOurBests(pre: Type, alts: List[Symbol], isSecondTry: Boolean): Unit = {
-        val alts0 = alts filter (alt => isWeaklyCompatible(pre memberType alt, pt))
-        val alts1 = if (alts0.isEmpty) alts else alts0
-        val bests = bestAlternatives(alts1) { (sym1, sym2) =>
-          val tp1 = pre memberType sym1
-          val tp2 = pre memberType sym2
+      val c = context
+      class InferTwice(pre: Type, alts: List[Symbol]) extends c.TryTwice {
+        def tryOnce(isSecondTry: Boolean): Unit = {
+          val alts0 = alts filter (alt => isWeaklyCompatible(pre memberType alt, pt))
+          val alts1 = if (alts0.isEmpty) alts else alts0
+          val bests = bestAlternatives(alts1) { (sym1, sym2) =>
+            val tp1 = pre memberType sym1
+            val tp2 = pre memberType sym2
 
-          (    (tp2 eq ErrorType)
-            || isWeaklyCompatible(tp1, pt) && !isWeaklyCompatible(tp2, pt)
-            || isStrictlyMoreSpecific(tp1, tp2, sym1, sym2)
-          )
-        }
-        // todo: missing test case for bests.isEmpty
-        bests match {
-          case best :: Nil                              => tree setSymbol best setType (pre memberType best)
-          case best :: competing :: _ if alts0.nonEmpty =>
-            // SI-6912 Don't give up and leave an OverloadedType on the tree.
-            //         Originally I wrote this as `if (secondTry) ... `, but `tryTwice` won't attempt the second try
-            //         unless an error is issued. We're not issuing an error, in the assumption that it would be
-            //         spurious in light of the erroneous expected type
-            if (pt.isErroneous) setError(tree)
-            else AmbiguousExprAlternativeError(tree, pre, best, competing, pt, isSecondTry)
-          case _                                        => if (bests.isEmpty || alts0.isEmpty) NoBestExprAlternativeError(tree, pt, isSecondTry)
+            (    (tp2 eq ErrorType)
+              || isWeaklyCompatible(tp1, pt) && !isWeaklyCompatible(tp2, pt)
+              || isStrictlyMoreSpecific(tp1, tp2, sym1, sym2)
+            )
+          }
+          // todo: missing test case for bests.isEmpty
+          bests match {
+            case best :: Nil                              => tree setSymbol best setType (pre memberType best)
+            case best :: competing :: _ if alts0.nonEmpty =>
+              // SI-6912 Don't give up and leave an OverloadedType on the tree.
+              //         Originally I wrote this as `if (secondTry) ... `, but `tryTwice` won't attempt the second try
+              //         unless an error is issued. We're not issuing an error, in the assumption that it would be
+              //         spurious in light of the erroneous expected type
+              if (pt.isErroneous) setError(tree)
+              else AmbiguousExprAlternativeError(tree, pre, best, competing, pt, isSecondTry)
+            case _                                        => if (bests.isEmpty || alts0.isEmpty) NoBestExprAlternativeError(tree, pt, isSecondTry)
+          }
         }
       }
       tree.tpe match {
-        case OverloadedType(pre, alts) => tryTwice(tryOurBests(pre, alts, _)) ; tree
+        case OverloadedType(pre, alts) => (new InferTwice(pre, alts)).apply() ; tree
         case _                         => tree
       }
     }
@@ -1309,20 +1332,33 @@ trait Infer extends Checkable {
      *  @param  varargsStar  true if the call site has a `: _*` attached to the last argument
      */
     private def overloadsToConsiderBySpecificity(eligible: List[Symbol], argtpes: List[Type], varargsStar: Boolean): List[Symbol] = {
+      // TODO spec: this namesMatch business is not spec'ed, and is the wrong fix for SI-4592
+      // we should instead clarify what the spec means by "typing each argument with an undefined expected type".
+      // What does typing a named argument entail when we don't know what the valid parameter names are?
+      // (Since we're doing overload resolution, there are multiple alternatives that can define different names.)
+      // Luckily, the next step checks applicability to the individual alternatives, so it knows whether an assignment is:
+      // 1) a valid named argument
+      // 2) a well-typed assignment
+      // 3) an error (e.g., rhs does not refer to a variable)
+      //
+      // For now, the logic is:
       // If there are any foo=bar style arguments, and any of the overloaded
-      // methods has a parameter named `foo`, then only those methods are considered.
-      val namesMatch = namesOfNamedArguments(argtpes) match {
+      // methods has a parameter named `foo`, then only those methods are considered when we must disambiguate.
+      def namesMatch = namesOfNamedArguments(argtpes) match {
         case Nil   => Nil
         case names => eligible filter (m => names forall (name => m.info.params exists (p => paramMatchesName(p, name))))
       }
-      if (namesMatch.nonEmpty)
-        namesMatch
-      else if (eligible.isEmpty || eligible.tail.isEmpty)
-        eligible
+      if (eligible.isEmpty || eligible.tail.isEmpty) eligible
       else
-        eligible filter (alt =>
-          !alt.hasDefault && isApplicableBasedOnArity(alt.tpe, argtpes.length, varargsStar, tuplingAllowed = true)
-      )
+        namesMatch match {
+          case namesMatch if namesMatch.nonEmpty => namesMatch // TODO: this has no basis in the spec, remove!
+          case _ =>
+            // If there are multiple applicable alternatives, drop those using default arguments.
+            // This is done indirectly by checking applicability based on arity in `isApplicableBasedOnArity`.
+            // If defaults are required in the application, the arities won't match up exactly.
+            // TODO: should we really allow tupling here?? (If we don't, this is the only call-site with `tuplingAllowed = true`)
+            eligible filter (alt => isApplicableBasedOnArity(alt.tpe, argtpes.length, varargsStar, tuplingAllowed = true))
+        }
     }
 
     /** Assign `tree` the type of an alternative which is applicable
@@ -1342,70 +1378,41 @@ trait Infer extends Checkable {
      *  @pre  tree.tpe is an OverloadedType.
      */
     def inferMethodAlternative(tree: Tree, undetparams: List[Symbol], argtpes0: List[Type], pt0: Type): Unit = {
-      val OverloadedType(pre, alts) = tree.tpe
-      var varargsStar = false
-      val argtpes = argtpes0 mapConserve {
-        case RepeatedType(tp) => varargsStar = true ; tp
-        case tp               => tp
-      }
-      def followType(sym: Symbol) = followApply(pre memberType sym)
-      def bestForExpectedType(pt: Type, isLastTry: Boolean): Unit = {
-        val applicable0 = alts filter (alt => context inSilentMode isApplicable(undetparams, followType(alt), argtpes, pt))
-        val applicable  = overloadsToConsiderBySpecificity(applicable0, argtpes, varargsStar)
-        val ranked      = bestAlternatives(applicable)((sym1, sym2) =>
-          isStrictlyMoreSpecific(followType(sym1), followType(sym2), sym1, sym2)
-        )
-        ranked match {
-          case best :: competing :: _ => AmbiguousMethodAlternativeError(tree, pre, best, competing, argtpes, pt, isLastTry) // ambiguous
-          case best :: Nil            => tree setSymbol best setType (pre memberType best)           // success
-          case Nil if pt.isWildcard   => NoBestMethodAlternativeError(tree, argtpes, pt, isLastTry)  // failed
-          case Nil                    => bestForExpectedType(WildcardType, isLastTry)                // failed, but retry with WildcardType
-        }
-      }
-      // This potentially makes up to four attempts: tryTwice may execute
+      // This potentially makes up to four attempts: tryOnce may execute
       // with and without views enabled, and bestForExpectedType will try again
       // with pt = WildcardType if it fails with pt != WildcardType.
-      tryTwice { isLastTry =>
-        val pt = if (pt0.typeSymbol == UnitClass) WildcardType else pt0
-        debuglog(s"infer method alt ${tree.symbol} with alternatives ${alts map pre.memberType} argtpes=$argtpes pt=$pt")
-        bestForExpectedType(pt, isLastTry)
-      }
-    }
+      val c = context
+      class InferMethodAlternativeTwice extends c.TryTwice {
+        private[this] val OverloadedType(pre, alts) = tree.tpe
+        private[this] var varargsStar = false
+        private[this] val argtpes = argtpes0 mapConserve {
+          case RepeatedType(tp) => varargsStar = true ; tp
+          case tp               => tp
+        }
 
-    /** Try inference twice, once without views and once with views,
-     *  unless views are already disabled.
-     */
-    def tryTwice(infer: Boolean => Unit): Unit = {
-      if (context.implicitsEnabled) {
-        val savedContextMode = context.contextMode
-        var fallback = false
-        context.setBufferErrors()
-        // We cache the current buffer because it is impossible to
-        // distinguish errors that occurred before entering tryTwice
-        // and our first attempt in 'withImplicitsDisabled'. If the
-        // first attempt fails we try with implicits on *and* clean
-        // buffer but that would also flush any pre-tryTwice valid
-        // errors, hence some manual buffer tweaking is necessary.
-        val errorsToRestore = context.flushAndReturnBuffer()
-        try {
-          context.withImplicitsDisabled(infer(false))
-          if (context.hasErrors) {
-            fallback = true
-            context.contextMode = savedContextMode
-            context.flushBuffer()
-            infer(true)
+        private def followType(sym: Symbol) = followApply(pre memberType sym)
+        // separate method to help the inliner
+        private def isAltApplicable(pt: Type)(alt: Symbol) = context inSilentMode { isApplicable(undetparams, followType(alt), argtpes, pt) && !context.reporter.hasErrors }
+        private def rankAlternatives(sym1: Symbol, sym2: Symbol) = isStrictlyMoreSpecific(followType(sym1), followType(sym2), sym1, sym2)
+        private def bestForExpectedType(pt: Type, isLastTry: Boolean): Unit = {
+          val applicable  = overloadsToConsiderBySpecificity(alts filter isAltApplicable(pt), argtpes, varargsStar)
+          val ranked      = bestAlternatives(applicable)(rankAlternatives)
+          ranked match {
+            case best :: competing :: _ => AmbiguousMethodAlternativeError(tree, pre, best, competing, argtpes, pt, isLastTry) // ambiguous
+            case best :: Nil            => tree setSymbol best setType (pre memberType best)           // success
+            case Nil if pt.isWildcard   => NoBestMethodAlternativeError(tree, argtpes, pt, isLastTry)  // failed
+            case Nil                    => bestForExpectedType(WildcardType, isLastTry)                // failed, but retry with WildcardType
           }
-        } catch {
-          case ex: CyclicReference  => throw ex
-          case ex: TypeError        => // recoverable cyclic references
-            context.contextMode = savedContextMode
-            if (!fallback) infer(true) else ()
-        } finally {
-          context.contextMode = savedContextMode
-          context.updateBuffer(errorsToRestore)
+        }
+
+        private[this] val pt = if (pt0.typeSymbol == UnitClass) WildcardType else pt0
+        def tryOnce(isLastTry: Boolean): Unit = {
+          debuglog(s"infer method alt ${tree.symbol} with alternatives ${alts map pre.memberType} argtpes=$argtpes pt=$pt")
+          bestForExpectedType(pt, isLastTry)
         }
       }
-      else infer(true)
+
+      (new InferMethodAlternativeTwice).apply()
     }
 
     /** Assign `tree` the type of all polymorphic alternatives

@@ -10,11 +10,10 @@ import scala.collection.mutable
 import scala.reflect.internal.util.Position
 
 /**
- * This class implements a Reporter that displays messages on a text
- * console.
+ * This class implements a Reporter that stores its reports in the set `infos`.
  */
 class StoreReporter extends Reporter {
-  class Info(val pos: Position, val msg: String, val severity: Severity) {
+  case class Info(pos: Position, msg: String, severity: Severity) {
     override def toString() = "pos: " + pos + " " + msg + " " + severity
   }
   val infos = new mutable.LinkedHashSet[Info]

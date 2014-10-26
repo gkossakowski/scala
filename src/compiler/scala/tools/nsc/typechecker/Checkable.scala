@@ -186,7 +186,7 @@ trait Checkable {
      *  additional conditions holds:
      *   - either A or B is effectively final
      *   - neither A nor B is a trait (i.e. both are actual classes, not eligible for mixin)
-     *   - both A and B are sealed, and every possible pairing of their children is irreconcilable
+     *   - both A and B are sealed/final, and every possible pairing of their children is irreconcilable
      *
      *  TODO: the last two conditions of the last possibility (that the symbols are not of
      *  classes being compiled in the current run) are because this currently runs too early,
@@ -198,11 +198,12 @@ trait Checkable {
          isEffectivelyFinal(sym1) // initialization important
       || isEffectivelyFinal(sym2)
       || !sym1.isTrait && !sym2.isTrait
-      || sym1.isSealed && sym2.isSealed && allChildrenAreIrreconcilable(sym1, sym2) && !currentRun.compiles(sym1) && !currentRun.compiles(sym2)
+      || isSealedOrFinal(sym1) && isSealedOrFinal(sym2) && allChildrenAreIrreconcilable(sym1, sym2) && !currentRun.compiles(sym1) && !currentRun.compiles(sym2)
     )
+    private def isSealedOrFinal(sym: Symbol) = sym.isSealed || sym.isFinal
     private def isEffectivelyFinal(sym: Symbol): Boolean = (
       // initialization important
-      sym.initialize.isEffectivelyFinal || (
+      sym.initialize.isEffectivelyFinalOrNotOverridden || (
         settings.future && isTupleSymbol(sym) // SI-7294 step into the future and treat TupleN as final.
       )
     )
@@ -259,9 +260,11 @@ trait Checkable {
       if (uncheckedOk(P0)) return
       def where = if (inPattern) "pattern " else ""
 
-      // singleton types not considered here
-      val P = P0.widen
+      // singleton types not considered here, dealias the pattern for SI-XXXX
+      val P = P0.dealiasWiden
       val X = X0.widen
+
+      def PString = if (P eq P0) P.toString else s"$P (the underlying of $P0)"
 
       P match {
         // Prohibit top-level type tests for these, but they are ok nested (e.g. case Foldable[Nothing] => ... )
@@ -272,7 +275,7 @@ trait Checkable {
           ;
         // Matching on types like case _: AnyRef { def bippy: Int } => doesn't work -- yet.
         case RefinedType(_, decls) if !decls.isEmpty =>
-          getContext.unit.warning(tree.pos, s"a pattern match on a refinement type is unchecked")
+          reporter.warning(tree.pos, s"a pattern match on a refinement type is unchecked")
         case RefinedType(parents, _) =>
           parents foreach (p => checkCheckable(tree, p, X, inPattern, canRemedy))
         case _ =>
@@ -282,14 +285,14 @@ trait Checkable {
 
           if (checker.neverMatches) {
             val addendum = if (checker.neverSubClass) "" else " (but still might match its erasure)"
-            getContext.unit.warning(tree.pos, s"fruitless type test: a value of type $X cannot also be a $P$addendum")
+            reporter.warning(tree.pos, s"fruitless type test: a value of type $X cannot also be a $PString$addendum")
           }
           else if (checker.isUncheckable) {
             val msg = (
-              if (checker.uncheckableType =:= P) s"abstract type $where$P"
-              else s"${checker.uncheckableMessage} in type $where$P"
+              if (checker.uncheckableType =:= P) s"abstract type $where$PString"
+              else s"${checker.uncheckableMessage} in type $where$PString"
             )
-            getContext.unit.warning(tree.pos, s"$msg is unchecked since it is eliminated by erasure")
+            reporter.warning(tree.pos, s"$msg is unchecked since it is eliminated by erasure")
           }
       }
     }

@@ -23,12 +23,9 @@ import scala.collection.mutable.ListBuffer
  *   Otherwise, the singleton consisting of the node itself.
  */
 trait Positions extends api.Positions { self: SymbolTable =>
-
   type Position = scala.reflect.internal.util.Position
   val NoPosition = scala.reflect.internal.util.NoPosition
   implicit val PositionTag = ClassTag[Position](classOf[Position])
-
-  def inform(msg: String): Unit
 
   def useOffsetPositions: Boolean = true
 
@@ -42,7 +39,7 @@ trait Positions extends api.Positions { self: SymbolTable =>
     if (useOffsetPositions) default else {
       val ranged = trees filter (_.pos.isRange)
       if (ranged.isEmpty) if (focus) default.focus else default
-      else new RangePosition(default.source, (ranged map (_.pos.start)).min, default.point, (ranged map (_.pos.end)).max)
+      else Position.range(default.source, (ranged map (_.pos.start)).min, default.point, (ranged map (_.pos.end)).max)
     }
   }
 
@@ -80,8 +77,8 @@ trait Positions extends api.Positions { self: SymbolTable =>
   }
 
   def rangePos(source: SourceFile, start: Int, point: Int, end: Int): Position =
-    if (useOffsetPositions) new OffsetPosition(source, point)
-    else new RangePosition(source, start, point, end)
+    if (useOffsetPositions) Position.offset(source, point)
+    else Position.range(source, start, point, end)
 
   def validatePositions(tree: Tree) {
     if (useOffsetPositions) return
@@ -100,7 +97,7 @@ trait Positions extends api.Positions { self: SymbolTable =>
       inform("\nWhile validating #" + tree.id)
       inform(treeStatus(tree))
       inform("\nChildren:")
-      tree.children map (t => "  " + treeStatus(t, tree)) foreach inform
+      tree.children foreach (t => inform("  " + treeStatus(t, tree)))
       inform("=======")
       throw new ValidateException(msg)
     }
@@ -109,7 +106,7 @@ trait Positions extends api.Positions { self: SymbolTable =>
 
       if (!tree.isEmpty && tree.canHaveAttrs) {
         if (settings.Yposdebug && (settings.verbose || settings.Yrangepos))
-          println("[%10s] %s".format("validate", treeStatus(tree, encltree)))
+          inform("[%10s] %s".format("validate", treeStatus(tree, encltree)))
 
         if (!tree.pos.isDefined)
           positionError("Unpositioned tree #"+tree.id) {
@@ -156,7 +153,7 @@ trait Positions extends api.Positions { self: SymbolTable =>
 
   /** A free range from `lo` to `hi` */
   private def free(lo: Int, hi: Int): Range =
-    Range(new RangePosition(null, lo, lo, hi), EmptyTree)
+    Range(Position.range(null, lo, lo, hi), EmptyTree)
 
   /** The maximal free range */
   private lazy val maxFree: Range = free(0, Int.MaxValue)
@@ -176,7 +173,7 @@ trait Positions extends api.Positions { self: SymbolTable =>
     case r :: rs1 =>
       assert(!t.pos.isTransparent)
       if (r.isFree && (r.pos includes t.pos)) {
-//      println("subdividing "+r+"/"+t.pos)
+//      inform("subdividing "+r+"/"+t.pos)
         maybeFree(t.pos.end, r.pos.end) ::: List(Range(t.pos, t)) ::: maybeFree(r.pos.start, t.pos.start) ::: rs1
       } else {
         if (!r.isFree && (r.pos overlaps t.pos)) conflicting += r.tree
@@ -225,7 +222,7 @@ trait Positions extends api.Positions { self: SymbolTable =>
     }
   } catch {
     case ex: Exception =>
-      println("error while set children pos "+pos+" of "+trees)
+      inform("error while set children pos "+pos+" of "+trees)
       throw ex
   }
 

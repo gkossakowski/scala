@@ -31,6 +31,30 @@ trait MatchTranslation {
   trait MatchTranslator extends TreeMakers with TreeMakerWarnings {
     import typer.context
 
+    /** A conservative approximation of which patterns do not discern anything.
+     * They are discarded during the translation.
+     */
+    object WildcardPattern {
+      def unapply(pat: Tree): Boolean = pat match {
+        case Bind(nme.WILDCARD, WildcardPattern()) => true // don't skip when binding an interesting symbol!
+        case Star(WildcardPattern())               => true
+        case x: Ident                              => treeInfo.isVarPattern(x)
+        case Alternative(ps)                       => ps forall unapply
+        case EmptyTree                             => true
+        case _                                     => false
+      }
+    }
+
+    object PatternBoundToUnderscore {
+      def unapply(pat: Tree): Boolean = pat match {
+        case Bind(nme.WILDCARD, _)                => true // don't skip when binding an interesting symbol!
+        case Ident(nme.WILDCARD)                  => true
+        case Alternative(ps)                      => ps forall unapply
+        case Typed(PatternBoundToUnderscore(), _) => true
+        case _                                    => false
+      }
+    }
+
     object SymbolBound {
       def unapply(tree: Tree): Option[(Symbol, Tree)] = tree match {
         case Bind(_, expr) if hasSym(tree) => Some(tree.symbol -> expr)
@@ -53,22 +77,18 @@ trait MatchTranslation {
         case TypeBound(tpe) => tpe
         case tree           => tree.tpe
       }
-      def repeatedType = unbound match {
-        case Star(tpt) => tpt.tpe
-        case _         => NoType
-      }
       def glbWith(other: Type) = glb(tpe :: other :: Nil).normalize
 
       object SymbolAndTypeBound {
         def unapply(tree: Tree): Option[(Symbol, Type)] = tree match {
-          case SymbolBound(sym, SymbolAndTypeBound(_, tpe)) => Some(sym -> tpe)
-          case TypeBound(tpe)                               => Some(binder -> tpe)
-          case _                                            => None
+          case SymbolBound(sym, TypeBound(tpe)) => Some(sym -> tpe)
+          case TypeBound(tpe)                   => Some(binder -> tpe)
+          case _                                => None
         }
       }
 
       object TypeBound {
-        def unapply(tree: Tree): Option[Type] = unbind(tree) match {
+        def unapply(tree: Tree): Option[Type] = tree match {
           case Typed(Ident(_), _) if tree.tpe != null => Some(tree.tpe)
           case _                                      => None
         }
@@ -90,10 +110,8 @@ trait MatchTranslation {
 
       // example check: List[Int] <:< ::[Int]
       private def extractorStep(): TranslationStep = {
-        import extractor.{ paramType, treeMaker }
-        if (!extractor.isTyped)
-          ErrorUtils.issueNormalTypeError(tree, "Could not typecheck extractor call: "+ extractor)(context)
-
+        def paramType = extractor.aligner.wholeType
+        import extractor.treeMaker
         // chain a type-testing extractor before the actual extractor call
         // it tests the type, checks the outer pointer and casts to the expected type
         // TODO: the outer check is mandated by the spec for case classes, but we do it for user-defined unapplies as well [SPEC]
@@ -136,7 +154,7 @@ trait MatchTranslation {
         case SymbolBound(sym, expr)                                   => bindingStep(sym, expr)
         case Literal(Constant(_)) | Ident(_) | Select(_, _) | This(_) => equalityTestStep()
         case Alternative(alts)                                        => alternativesStep(alts)
-        case _                                                        => context.unit.error(pos, unsupportedPatternMsg) ; noStep()
+        case _                                                        => reporter.error(pos, unsupportedPatternMsg) ; noStep()
       }
       def translate(): List[TreeMaker] = nextStep() merge (_.translate())
 
@@ -359,36 +377,20 @@ trait MatchTranslation {
     object ExtractorCall {
       // TODO: check unargs == args
       def apply(tree: Tree): ExtractorCall = tree match {
-        case UnApply(unfun, args) => new ExtractorCallRegular(unfun, args) // extractor
-        case Apply(fun, args)     => new ExtractorCallProd(fun, args)      // case class
+        case UnApply(unfun, args) => new ExtractorCallRegular(alignPatterns(context, tree), unfun, args) // extractor
+        case Apply(fun, args)     => new ExtractorCallProd(alignPatterns(context, tree), fun, args)      // case class
       }
     }
 
-    abstract class ExtractorCall {
+    abstract class ExtractorCall(val aligner: PatternAligned) {
+      import aligner._
       def fun: Tree
       def args: List[Tree]
 
-      val nbSubPats     = args.length
-      val starLength    = if (hasStar) 1 else 0
-      val nonStarLength = args.length - starLength
-
-      // everything okay, captain?
-      def isTyped: Boolean
-      def isSeq: Boolean
-
-      private def hasStar       = nbSubPats > 0 && isStar(args.last)
-      private def isNonEmptySeq = nbSubPats > 0 && isSeq
-
-      /** This is special cased so that a single pattern will accept any extractor
-       *  result, even if it's a tuple (SI-6675)
-       */
-      def isSingle = nbSubPats == 1 && !isSeq
-
-      // to which type should the previous binder be casted?
-      def paramType  : Type
-
-      protected def rawSubPatTypes: List[Type]
-      protected def resultType: Type
+      // don't go looking for selectors if we only expect one pattern
+      def rawSubPatTypes = aligner.extractedTypes
+      def resultInMonad  = if (isBool) UnitTpe else typeOfMemberNamedGet(resultType)
+      def resultType     = fun.tpe.finalResultType
 
       /** Create the TreeMaker that embodies this extractor call
        *
@@ -411,25 +413,14 @@ trait MatchTranslation {
       lazy val ignoredSubPatBinders: Set[Symbol] = subPatBinders zip args collect { case (b, PatternBoundToUnderscore()) => b } toSet
 
       // do repeated-parameter expansion to match up with the expected number of arguments (in casu, subpatterns)
-      private def nonStarSubPatTypes = formalTypes(rawInit :+ repeatedType, nonStarLength)
+      private def nonStarSubPatTypes = aligner.typedNonStarPatterns map (_.tpe)
 
-      def subPatTypes: List[Type] = (
-        if (rawSubPatTypes.isEmpty || !isSeq) rawSubPatTypes
-        else if (hasStar) nonStarSubPatTypes :+ sequenceType
-        else nonStarSubPatTypes
-      )
+      def subPatTypes: List[Type] = typedPatterns map (_.tpe)
 
-      private def rawGet         = typeOfMemberNamedGetOrSelf(resultType)
-      private def emptySub       = rawSubPatTypes.isEmpty
-      private def rawInit        = rawSubPatTypes dropRight 1
-      protected def sequenceType = typeOfLastSelectorOrSelf(rawGet)
-      protected def elementType  = elementTypeOfLastSelectorOrSelf(rawGet)
-      protected def repeatedType = scalaRepeatedType(elementType)
-
-      // rawSubPatTypes.last is the Seq, thus there are `rawSubPatTypes.length - 1` non-seq elements in the tuple
-      protected def firstIndexingBinder = rawSubPatTypes.length - 1
-      protected def lastIndexingBinder  = nbSubPats - 1 - starLength
-      protected def expectedLength      = lastIndexingBinder - firstIndexingBinder + 1
+      // there are `productArity` non-seq elements in the tuple.
+      protected def firstIndexingBinder = productArity
+      protected def expectedLength      = elementArity
+      protected def lastIndexingBinder  = totalArity - starArity - 1
 
       private def productElemsToN(binder: Symbol, n: Int): List[Tree] = 1 to n map tupleSel(binder) toList
       private def genTake(binder: Symbol, n: Int): List[Tree]         = (0 until n).toList map (codegen index seqTree(binder))
@@ -443,12 +434,12 @@ trait MatchTranslation {
       // referenced by `binder`
       protected def subPatRefsSeq(binder: Symbol): List[Tree] = {
         def lastTrees: List[Tree] = (
-          if (!hasStar) Nil
+          if (!aligner.isStar) Nil
           else if (expectedLength == 0) seqTree(binder) :: Nil
           else genDrop(binder, expectedLength)
         )
         // this error-condition has already been checked by checkStarPatOK:
-        //   if(isSeq) assert(firstIndexingBinder + nbIndexingIndices + (if(lastIsStar) 1 else 0) == nbSubPats, "(resultInMonad, ts, subPatTypes, subPats)= "+(resultInMonad, ts, subPatTypes, subPats))
+        //   if(isSeq) assert(firstIndexingBinder + nbIndexingIndices + (if(lastIsStar) 1 else 0) == totalArity, "(resultInMonad, ts, subPatTypes, subPats)= "+(resultInMonad, ts, subPatTypes, subPats))
 
         // [1] there are `firstIndexingBinder` non-seq tuple elements preceding the Seq
         // [2] then we have to index the binder that represents the sequence for the remaining subpatterns, except for...
@@ -462,8 +453,10 @@ trait MatchTranslation {
 
       // the trees that select the subpatterns on the extractor's result, referenced by `binder`
       // require (nbSubPats > 0 && (!lastIsStar || isSeq))
-      protected def subPatRefs(binder: Symbol): List[Tree] =
-        if (isNonEmptySeq) subPatRefsSeq(binder) else productElemsToN(binder, nbSubPats)
+      protected def subPatRefs(binder: Symbol): List[Tree] = (
+        if (totalArity > 0 && isSeq) subPatRefsSeq(binder)
+        else productElemsToN(binder, totalArity)
+      )
 
       private def compareInts(t1: Tree, t2: Tree) =
         gen.mkMethodCall(termMember(ScalaPackage, "math"), TermName("signum"), Nil, (t1 INT_- t2) :: Nil)
@@ -483,7 +476,7 @@ trait MatchTranslation {
           // when the last subpattern is a wildcard-star the expectedLength is but a lower bound
           // (otherwise equality is required)
           def compareOp: (Tree, Tree) => Tree =
-            if (hasStar) _ INT_>= _
+            if (aligner.isStar) _ INT_>= _
             else         _ INT_== _
 
           // `if (binder != null && $checkExpectedLength [== | >=] 0) then else zero`
@@ -492,31 +485,14 @@ trait MatchTranslation {
 
       def checkedLength: Option[Int] =
         // no need to check unless it's an unapplySeq and the minimal length is non-trivially satisfied
-        if (!isSeq || expectedLength < starLength) None
+        if (!isSeq || expectedLength < starArity) None
         else Some(expectedLength)
     }
 
     // TODO: to be called when there's a def unapplyProd(x: T): U
     // U must have N members _1,..., _N -- the _i are type checked, call their type Ti,
     // for now only used for case classes -- pretending there's an unapplyProd that's the identity (and don't call it)
-    class ExtractorCallProd(val fun: Tree, val args: List[Tree]) extends ExtractorCall {
-      // TODO: fix the illegal type bound in pos/t602 -- type inference messes up before we get here:
-      /*override def equals(x$1: Any): Boolean = ...
-             val o5: Option[com.mosol.sl.Span[Any]] =  // Span[Any] --> Any is not a legal type argument for Span!
-      */
-
-      private def constructorTp = fun.tpe
-
-      def isTyped    = fun.isTyped
-
-      // to which type should the previous binder be casted?
-      def paramType  = constructorTp.finalResultType
-      def resultType = fun.tpe.finalResultType
-
-      def isSeq = isVarArgTypes(rawSubPatTypes)
-
-      protected def rawSubPatTypes = constructorTp.paramTypes
-
+    class ExtractorCallProd(aligner: PatternAligned, val fun: Tree, val args: List[Tree]) extends ExtractorCall(aligner) {
       /** Create the TreeMaker that embodies this extractor call
        *
        * `binder` has been casted to `paramType` if necessary
@@ -545,19 +521,10 @@ trait MatchTranslation {
         if (accessors isDefinedAt (i-1)) REF(binder) DOT accessors(i-1)
         else codegen.tupleSel(binder)(i) // this won't type check for case classes, as they do not inherit ProductN
       }
-
-      override def toString() = s"ExtractorCallProd($fun:${fun.tpe} / ${fun.symbol} / args=$args)"
     }
 
-    class ExtractorCallRegular(extractorCallIncludingDummy: Tree, val args: List[Tree]) extends ExtractorCall {
+    class ExtractorCallRegular(aligner: PatternAligned, extractorCallIncludingDummy: Tree, val args: List[Tree]) extends ExtractorCall(aligner) {
       val Unapplied(fun) = extractorCallIncludingDummy
-
-      def tpe        = fun.tpe
-      def paramType  = firstParamType(tpe)
-      def resultType = tpe.finalResultType
-      def isTyped    = (tpe ne NoType) && fun.isTyped && (resultInMonad ne ErrorType)
-      def isSeq      = fun.symbol.name == nme.unapplySeq
-      def isBool     = resultType =:= BooleanTpe
 
       /** Create the TreeMaker that embodies this extractor call
        *
@@ -581,7 +548,7 @@ trait MatchTranslation {
         ExtractorTreeMaker(extractorApply, lengthGuard(binder), binder)(
           subPatBinders,
           subPatRefs(binder),
-          isBool,
+          aligner.isBool,
           checkedLength,
           patBinderOrCasted,
           ignoredSubPatBinders
@@ -593,16 +560,22 @@ trait MatchTranslation {
         else super.seqTree(binder)
 
       // the trees that select the subpatterns on the extractor's result, referenced by `binder`
-      // require (nbSubPats > 0 && (!lastIsStar || isSeq))
+      // require (totalArity > 0 && (!lastIsStar || isSeq))
       override protected def subPatRefs(binder: Symbol): List[Tree] =
-        if (isSingle) REF(binder) :: Nil // special case for extractors
+        if (aligner.isSingle) REF(binder) :: Nil // special case for extractors
         else super.subPatRefs(binder)
 
       protected def spliceApply(binder: Symbol): Tree = {
         object splice extends Transformer {
+          def binderRef(pos: Position): Tree =
+            REF(binder) setPos pos
           override def transform(t: Tree) = t match {
+            // duplicated with the extractor Unapplied
             case Apply(x, List(i @ Ident(nme.SELECTOR_DUMMY))) =>
-              treeCopy.Apply(t, x, (REF(binder) setPos i.pos) :: Nil)
+              treeCopy.Apply(t, x, binderRef(i.pos) :: Nil)
+            // SI-7868 Account for numeric widening, e.g. <unappplySelector>.toInt
+            case Apply(x, List(i @ (sel @ Select(Ident(nme.SELECTOR_DUMMY), name)))) =>
+              treeCopy.Apply(t, x, treeCopy.Select(sel, binderRef(i.pos), name) :: Nil)
             case _ =>
               super.transform(t)
           }
@@ -610,47 +583,7 @@ trait MatchTranslation {
         splice transform extractorCallIncludingDummy
       }
 
-      // what's the extractor's result type in the monad? It is the type of its nullary member `get`.
-      protected lazy val resultInMonad: Type = if (isBool) UnitTpe else typeOfMemberNamedGet(resultType)
-
-      protected lazy val rawSubPatTypes = (
-        if (isBool) Nil
-        else if (isSingle) resultInMonad :: Nil     // don't go looking for selectors if we only expect one pattern
-        else typesOfSelectorsOrSelf(resultInMonad)
-      )
-
-      override def toString() = s"ExtractorCallRegular($fun: $tpe / ${fun.symbol})"
-    }
-
-    /** A conservative approximation of which patterns do not discern anything.
-     * They are discarded during the translation.
-     */
-    object WildcardPattern {
-      def unapply(pat: Tree): Boolean = pat match {
-        case Bind(nme.WILDCARD, WildcardPattern()) => true // don't skip when binding an interesting symbol!
-        case Star(WildcardPattern())               => true
-        case x: Ident                              => treeInfo.isVarPattern(x)
-        case Alternative(ps)                       => ps forall unapply
-        case EmptyTree                             => true
-        case _                                     => false
-      }
-    }
-
-    object PatternBoundToUnderscore {
-      def unapply(pat: Tree): Boolean = pat match {
-        case Bind(nme.WILDCARD, _)                => true // don't skip when binding an interesting symbol!
-        case Ident(nme.WILDCARD)                  => true
-        case Alternative(ps)                      => ps forall unapply
-        case Typed(PatternBoundToUnderscore(), _) => true
-        case _                                    => false
-      }
-    }
-
-    object Bound {
-      def unapply(t: Tree): Option[(Symbol, Tree)] = t match {
-        case t@Bind(n, p) if t.hasExistingSymbol => Some((t.symbol, p)) // pos/t2429 does not satisfy these conditions
-        case _                                   => None
-      }
+      override def rawSubPatTypes = aligner.extractor.varargsTypes
     }
   }
 }

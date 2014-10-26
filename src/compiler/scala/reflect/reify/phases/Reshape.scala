@@ -9,6 +9,8 @@ trait Reshape {
   import global._
   import definitions._
   import treeInfo.Unapplied
+  private val runDefinitions = currentRun.runDefinitions
+  import runDefinitions._
 
   /**
    *  Rolls back certain changes that were introduced during typechecking of the reifee.
@@ -169,7 +171,7 @@ trait Reshape {
     private def toPreTyperCompoundTypeTree(ctt: CompoundTypeTree): Tree = {
       val CompoundTypeTree(tmpl @ Template(parents, self, stats)) = ctt
       if (stats.nonEmpty) CannotReifyCompoundTypeTreeWithNonEmptyBody(ctt)
-      assert(self eq emptyValDef, self)
+      assert(self eq noSelfType, self)
       val att = tmpl.attachments.get[CompoundTypeTreeOriginalAttachment]
       val CompoundTypeTreeOriginalAttachment(parents1, stats1) = att.getOrElse(CompoundTypeTreeOriginalAttachment(parents, stats))
       CompoundTypeTree(Template(parents1, self, stats1))

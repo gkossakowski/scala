@@ -7,12 +7,12 @@ quasiquotes-syntax-error-position.scala:6: error: illegal start of simple expres
 quasiquotes-syntax-error-position.scala:7: error: '}' expected but end of quote found.
   q"class $t { def foo = $a"
                            ^
-quasiquotes-syntax-error-position.scala:8: error: '.' expected but splicee found.
+quasiquotes-syntax-error-position.scala:8: error: '.' expected but unquotee found.
   q"import $t $t"
               ^
-quasiquotes-syntax-error-position.scala:9: error: illegal start of definition
+quasiquotes-syntax-error-position.scala:9: error: '{' expected but end of quote found.
   q"package p"
-    ^
+             ^
 quasiquotes-syntax-error-position.scala:10: error: ';' expected but '@' found.
   q"foo@$a"
        ^
@@ -29,4 +29,19 @@ quasiquotes-syntax-error-position.scala:13: error: end of quote expected but 'ca
 quasiquotes-syntax-error-position.scala:14: error: ')' expected but end of quote found.
   pq"$a(bar"
            ^
-10 errors found
+quasiquotes-syntax-error-position.scala:15: error: ':' expected but ')' found.
+  q"def foo(x)"
+             ^
+quasiquotes-syntax-error-position.scala:16: error: illegal start of simple expression
+  q"$a(])"
+       ^
+quasiquotes-syntax-error-position.scala:17: error: in XML literal: '>' expected instead of '$'
+  q"foo bar <xml$a>"
+                ^
+quasiquotes-syntax-error-position.scala:19: error: ';' expected but '<:' found.
+  q"val $x: $x <: $x"
+               ^
+quasiquotes-syntax-error-position.scala:20: error: '=' expected but '.' found.
+  q"def f ( $x  ) . $x"
+                  ^
+15 errors found

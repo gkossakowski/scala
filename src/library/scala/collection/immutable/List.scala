@@ -6,8 +6,6 @@
 **                          |/                                          **
 \*                                                                      */
 
-
-
 package scala
 package collection
 package immutable
@@ -192,11 +190,9 @@ sealed abstract class List[+A] extends AbstractSeq[A]
 
   // Overridden methods from IterableLike and SeqLike or overloaded variants of such methods
 
-  override def ++[B >: A, That](that: GenTraversableOnce[B])(implicit bf: CanBuildFrom[List[A], B, That]): That = {
-    val b = bf(this)
-    if (b.isInstanceOf[ListBuffer[_]]) (this ::: that.seq.toList).asInstanceOf[That]
+  override def ++[B >: A, That](that: GenTraversableOnce[B])(implicit bf: CanBuildFrom[List[A], B, That]): That =
+    if (bf eq List.ReusableCBF) (this ::: that.seq.toList).asInstanceOf[That]
     else super.++(that)
-  }
 
   override def +:[B >: A, That](elem: B)(implicit bf: CanBuildFrom[List[A], B, That]): That = bf match {
     case _: List.GenericCanBuildFrom[_] => (elem :: this).asInstanceOf[That]
@@ -205,17 +201,19 @@ sealed abstract class List[+A] extends AbstractSeq[A]
 
   override def toList: List[A] = this
 
-  override def take(n: Int): List[A] = {
-    val b = new ListBuffer[A]
-    var i = 0
-    var these = this
-    while (!these.isEmpty && i < n) {
+  override def take(n: Int): List[A] = if (isEmpty || n <= 0) Nil else {
+    val h = new ::(head, Nil)
+    var t = h
+    var rest = tail
+    var i = 1
+    while ({if (rest.isEmpty) return this; i < n}) {
       i += 1
-      b += these.head
-      these = these.tail
+      val nx = new ::(rest.head, Nil)
+      t.tl = nx
+      t = nx
+      rest = rest.tail
     }
-    if (these.isEmpty) this
-    else b.toList
+    h
   }
 
   override def drop(n: Int): List[A] = {
@@ -265,6 +263,85 @@ sealed abstract class List[+A] extends AbstractSeq[A]
       these = these.tail
     }
     (b.toList, these)
+  }
+  
+  @noinline // TODO - fix optimizer bug that requires noinline (see SI-8334)
+  final override def map[B, That](f: A => B)(implicit bf: CanBuildFrom[List[A], B, That]): That = {
+    if (bf eq List.ReusableCBF) {
+      if (this eq Nil) Nil.asInstanceOf[That] else {
+        val h = new ::[B](f(head), Nil)
+        var t: ::[B] = h
+        var rest = tail
+        while (rest ne Nil) {
+          val nx = new ::(f(rest.head), Nil)
+          t.tl = nx
+          t = nx
+          rest = rest.tail
+        }
+        h.asInstanceOf[That]
+      }
+    }
+    else super.map(f)
+  }
+  
+  @noinline // TODO - fix optimizer bug that requires noinline for map; applied here to be safe (see SI-8334)
+  final override def collect[B, That](pf: PartialFunction[A, B])(implicit bf: CanBuildFrom[List[A], B, That]): That = {
+    if (bf eq List.ReusableCBF) {
+      if (this eq Nil) Nil.asInstanceOf[That] else {
+        var rest = this
+        var h: ::[B] = null
+        var x: A = null.asInstanceOf[A]
+        // Special case for first element
+        do {
+          val x: Any = pf.applyOrElse(rest.head, List.partialNotApplied)
+          if (x.asInstanceOf[AnyRef] ne List.partialNotApplied) h = new ::(x.asInstanceOf[B], Nil)
+          rest = rest.tail
+          if (rest eq Nil) return (if (h eq null ) Nil else h).asInstanceOf[That]
+        } while (h eq null)
+        var t = h
+        // Remaining elements
+        do {
+          val x: Any = pf.applyOrElse(rest.head, List.partialNotApplied)
+          if (x.asInstanceOf[AnyRef] ne List.partialNotApplied) {
+            val nx = new ::(x.asInstanceOf[B], Nil)
+            t.tl = nx
+            t = nx
+          }
+          rest = rest.tail
+        } while (rest ne Nil)
+        h.asInstanceOf[That]
+      }
+    }
+    else super.collect(pf)
+  }
+  
+  @noinline // TODO - fix optimizer bug that requires noinline for map; applied here to be safe (see SI-8334)
+  final override def flatMap[B, That](f: A => GenTraversableOnce[B])(implicit bf: CanBuildFrom[List[A], B, That]): That = {
+    if (bf eq List.ReusableCBF) {
+      if (this eq Nil) Nil.asInstanceOf[That] else {
+        var rest = this
+        var found = false
+        var h: ::[B] = null
+        var t: ::[B] = null
+        while (rest ne Nil) {
+          f(rest.head).foreach{ b =>
+            if (!found) {
+              h = new ::(b, Nil)
+              t = h
+              found = true
+            }
+            else {
+              val nx = new ::(b, Nil)
+              t.tl = nx
+              t = nx
+            }
+          }
+          rest = rest.tail
+        }
+        (if (!found) Nil else h).asInstanceOf[That]
+      }
+    }
+    else super.flatMap(f)
   }
 
   @inline final override def takeWhile(p: A => Boolean): List[A] = {
@@ -324,6 +401,10 @@ sealed abstract class List[+A] extends AbstractSeq[A]
   override def toStream : Stream[A] =
     if (isEmpty) Stream.Empty
     else new Stream.Cons(head, tail.toStream)
+
+  // Create a proxy for Java serialization that allows us to avoid mutation
+  // during de-serialization.  This is the Serialization Proxy Pattern.
+  protected final def writeReplace(): AnyRef = new List.SerializationProxy(this)
 }
 
 /** The empty list.
@@ -354,33 +435,9 @@ case object Nil extends List[Nothing] {
  *  @version 1.0, 15/07/2003
  *  @since   2.8
  */
-@SerialVersionUID(0L - 8476791151983527571L)
-final case class ::[B](private var hd: B, private[scala] var tl: List[B]) extends List[B] {
-  override def head : B = hd
+final case class ::[B](override val head: B, private[scala] var tl: List[B]) extends List[B] {
   override def tail : List[B] = tl
   override def isEmpty: Boolean = false
-
-  private def readObject(in: ObjectInputStream) {
-    val firstObject = in.readObject()
-    hd = firstObject.asInstanceOf[B]
-    assert(hd != ListSerializeEnd)
-    var current: ::[B] = this
-    while (true) in.readObject match {
-      case ListSerializeEnd =>
-        current.tl = Nil
-        return
-      case a =>
-        val list : ::[B] = new ::(a.asInstanceOf[B], Nil)
-        current.tl = list
-        current = list
-    }
-  }
-
-  private def writeObject(out: ObjectOutputStream) {
-    var xs: List[B] = this
-    while (!xs.isEmpty) { out.writeObject(xs.head); xs = xs.tail }
-    out.writeObject(ListSerializeEnd)
-  }
 }
 
 /** $factoryInfo
@@ -397,9 +454,39 @@ object List extends SeqFactory[List] {
   override def empty[A]: List[A] = Nil
 
   override def apply[A](xs: A*): List[A] = xs.toList
+  
+  private[collection] val partialNotApplied = new Function1[Any, Any] { def apply(x: Any): Any = this }
+
+  @SerialVersionUID(1L)
+  private class SerializationProxy[A](@transient private var orig: List[A]) extends Serializable {
+
+    private def writeObject(out: ObjectOutputStream) {
+      var xs: List[A] = orig
+      while (!xs.isEmpty) {
+        out.writeObject(xs.head)
+        xs = xs.tail
+      }
+      out.writeObject(ListSerializeEnd)
+    }
+
+    // Java serialization calls this before readResolve during de-serialization.
+    // Read the whole list and store it in `orig`.
+    private def readObject(in: ObjectInputStream) {
+      val builder = List.newBuilder[A]
+      while (true) in.readObject match {
+        case ListSerializeEnd =>
+          orig = builder.result()
+          return
+        case a =>
+          builder += a.asInstanceOf[A]
+      }
+    }
+
+    // Provide the result stored in `orig` for Java serialization
+    private def readResolve(): AnyRef = orig
+  }
 }
 
 /** Only used for list serialization */
 @SerialVersionUID(0L - 8476791151975527571L)
 private[scala] case object ListSerializeEnd
-

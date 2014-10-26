@@ -352,13 +352,17 @@ abstract class ClassfileParser {
   }
 
   private def loadClassSymbol(name: Name): Symbol = {
-    val file = classPath findSourceFile ("" +name) getOrElse {
+    val file = classPath findClassFile ("" +name) getOrElse {
       // SI-5593 Scaladoc's current strategy is to visit all packages in search of user code that can be documented
       // therefore, it will rummage through the classpath triggering errors whenever it encounters package objects
       // that are not in their correct place (see bug for details)
-      if (!settings.isScaladoc)
-        warning(s"Class $name not found - continuing with a stub.")
-      return NoSymbol.newClass(name.toTypeName)
+
+      // TODO More consistency with use of stub symbols in `Unpickler`
+      //   - better owner than `NoSymbol`
+      //   - remove eager warning
+      val msg = s"Class $name not found - continuing with a stub."
+      if (!settings.isScaladoc) warning(msg)
+      return NoSymbol.newStubSymbol(name.toTypeName, msg)
     }
     val completer     = new loaders.ClassfileLoader(file)
     var owner: Symbol = rootMirror.RootClass
@@ -515,7 +519,7 @@ abstract class ClassfileParser {
       val info    = readType()
       val sym     = ownerForFlags(jflags).newValue(name.toTermName, NoPosition, sflags)
 
-      // Note: the info may be overrwritten later with a generic signature
+      // Note: the info may be overwritten later with a generic signature
       // parsed from SignatureATTR
       sym setInfo {
         if (jflags.isEnum) ConstantType(Constant(sym))
@@ -561,14 +565,14 @@ abstract class ClassfileParser {
               // if this is a non-static inner class, remove the explicit outer parameter
               val paramsNoOuter = innerClasses getEntry currentClass match {
                 case Some(entry) if !isScalaRaw && !entry.jflags.isStatic =>
-                  /* About `clazz.owner.isPackage` below: SI-5957
+                  /* About `clazz.owner.hasPackageFlag` below: SI-5957
                    * For every nested java class A$B, there are two symbols in the scala compiler.
                    *  1. created by SymbolLoader, because of the existence of the A$B.class file, owner: package
                    *  2. created by ClassfileParser of A when reading the inner classes, owner: A
                    * If symbol 1 gets completed (e.g. because the compiled source mentions `A$B`, not `A#B`), the
                    * ClassfileParser for 1 executes, and clazz.owner is the package.
                    */
-                  assert(params.head.tpe.typeSymbol == clazz.owner || clazz.owner.isPackage, params.head.tpe.typeSymbol + ": " + clazz.owner)
+                  assert(params.head.tpe.typeSymbol == clazz.owner || clazz.owner.hasPackageFlag, params.head.tpe.typeSymbol + ": " + clazz.owner)
                   params.tail
                 case _ =>
                   params
@@ -665,8 +669,11 @@ abstract class ClassfileParser {
               // so have to check unsafeTypeParams.isEmpty before worrying about raw type case below,
               // or we'll create a boatload of needless existentials.
               else if (classSym.isMonomorphicType || classSym.unsafeTypeParams.isEmpty) tp
-              // raw type - existentially quantify all type parameters
-              else debuglogResult(s"raw type from $classSym")(unsafeClassExistentialType(classSym))
+              else debuglogResult(s"raw type from $classSym"){
+                // raw type - existentially quantify all type parameters
+                val eparams = typeParamsToExistentials(classSym, classSym.unsafeTypeParams)
+                newExistentialType(eparams, typeRef(pre, classSym, eparams.map(_.tpeHK)))
+              }
             case tp =>
               assert(sig.charAt(index) != '<', s"sig=$sig, index=$index, tp=$tp")
               tp
@@ -1040,7 +1047,7 @@ abstract class ClassfileParser {
     for (entry <- innerClasses.entries) {
       // create a new class member for immediate inner classes
       if (entry.outerName == currentClass) {
-        val file = classPath.findSourceFile(entry.externalName.toString) getOrElse {
+        val file = classPath.findClassFile(entry.externalName.toString) getOrElse {
           throw new AssertionError(entry.externalName)
         }
         enterClassAndModule(entry, file)

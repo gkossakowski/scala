@@ -21,7 +21,7 @@ trait Members {
 
   import global._
 
-  object NoCode extends Code(null, "NoCode") {
+  object NoCode extends Code(null, TermName("NoCode")) {
     override def blocksList: List[BasicBlock] = Nil
   }
 
@@ -29,8 +29,8 @@ trait Members {
    * This class represents the intermediate code of a method or
    * other multi-block piece of code, like exception handlers.
    */
-  class Code(method: IMethod, name: String) {
-    def this(method: IMethod) = this(method, method.symbol.decodedName.toString.intern)
+  class Code(method: IMethod, name: Name) {
+    def this(method: IMethod) = this(method, method.symbol.name)
     /** The set of all blocks */
     val blocks = mutable.ListBuffer[BasicBlock]()
 
@@ -82,7 +82,7 @@ trait Members {
     }
 
     /** This methods returns a string representation of the ICode */
-    override def toString = "ICode '" + name + "'"
+    override def toString = "ICode '" + name.decoded + "'"
 
     /* Compute a unique new label */
     def nextLabel: Int = {
@@ -195,6 +195,10 @@ trait Members {
       this
     }
 
+    final def updateRecursive(called: Symbol): Unit = {
+      recursive ||= (called == symbol)
+    }
+
     def addLocal(l: Local): Local = findOrElse(locals)(_ == l) { locals ::= l ; l }
 
     def addParam(p: Local): Unit =
@@ -281,12 +285,6 @@ trait Members {
   /** Represent local variables and parameters */
   class Local(val sym: Symbol, val kind: TypeKind, val arg: Boolean) {
     var index: Int = -1
-
-    /** Starting PC for this local's visibility range. */
-    var start: Int = _
-
-    /** PC-based ranges for this local variable's visibility */
-    var ranges: List[(Int, Int)] = Nil
 
     override def equals(other: Any): Boolean = other match {
       case x: Local => sym == x.sym

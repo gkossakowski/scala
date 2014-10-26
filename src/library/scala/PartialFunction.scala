@@ -20,6 +20,11 @@ package scala
  *  {{{
  *  val f: PartialFunction[Int, Any] = { case _ => 1/0 }
  *  }}}
+ * 
+ *  It is the responsibility of the caller to call `isDefinedAt` before
+ *  calling `apply`, because if `isDefinedAt` is false, it is not guaranteed
+ *  `apply` will throw an exception to indicate an error condition. If an
+ *  exception is not thrown, evaluation may result in an arbitrary value.
  *
  *  The main distinction between `PartialFunction` and [[scala.Function1]] is
  *  that the user of a `PartialFunction` may choose to do something different
@@ -94,7 +99,7 @@ trait PartialFunction[-A, +B] extends (A => B) { self =>
    *  Note that expression `pf.applyOrElse(x, default)` is equivalent to
    *  {{{ if(pf isDefinedAt x) pf(x) else default(x) }}}
    *  except that `applyOrElse` method can be implemented more efficiently.
-   *  For all partial function literals compiler generates `applyOrElse` implementation which
+   *  For all partial function literals the compiler generates an `applyOrElse` implementation which
    *  avoids double evaluation of pattern matchers and guards.
    *  This makes `applyOrElse` the basis for the efficient implementation for many operations and scenarios, such as:
    *

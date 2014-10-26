@@ -122,7 +122,7 @@ abstract class LambdaLift extends InfoTransform {
      *  and the owner of `sym`.
      *  Return `true` if there is no class between `enclosure` and
      *  the owner of sym.
-     *  pre: sym.isLocal, (enclosure.isMethod || enclosure.isClass)
+     *  pre: sym.isLocalToBlock, (enclosure.isMethod || enclosure.isClass)
      *
      *  The idea of `markFree` is illustrated with an example:
      *
@@ -180,7 +180,7 @@ abstract class LambdaLift extends InfoTransform {
         tree match {
           case ClassDef(_, _, _, _) =>
             liftedDefs(tree.symbol) = Nil
-            if (sym.isLocal) {
+            if (sym.isLocalToBlock) {
               // Don't rename implementation classes independently of their interfaces. If
               // the interface is to be renamed, then we will rename the implementation
               // class at that time. You'd think we could call ".implClass" on the trait
@@ -201,7 +201,7 @@ abstract class LambdaLift extends InfoTransform {
               }
             }
           case DefDef(_, _, _, _, _, _) =>
-            if (sym.isLocal) {
+            if (sym.isLocalToBlock) {
               renamable += sym
               sym setFlag (PrivateLocal | FINAL)
             } else if (sym.isPrimaryConstructor) {
@@ -210,14 +210,14 @@ abstract class LambdaLift extends InfoTransform {
           case Ident(name) =>
             if (sym == NoSymbol) {
               assert(name == nme.WILDCARD)
-            } else if (sym.isLocal) {
+            } else if (sym.isLocalToBlock) {
               val owner = currentOwner.logicallyEnclosingMember
               if (sym.isTerm && !sym.isMethod) markFree(sym, owner)
               else if (sym.isMethod) markCalled(sym, owner)
                 //symSet(called, owner) += sym
             }
           case Select(_, _) =>
-            if (sym.isConstructor && sym.owner.isLocal)
+            if (sym.isConstructor && sym.owner.isLocalToBlock)
               markCalled(sym, currentOwner.logicallyEnclosingMember)
           case _ =>
         }
@@ -339,7 +339,7 @@ abstract class LambdaLift extends InfoTransform {
           if (clazz.isStaticOwner) clazz.fullLocationString
           else s"the unconstructed `this` of ${clazz.fullLocationString}"
         val msg = s"Implementation restriction: access of ${sym.fullLocationString} from ${currentClass.fullLocationString}, would require illegal premature access to $what"
-        currentUnit.error(curTree.pos, msg)
+        reporter.error(curTree.pos, msg)
       }
       val qual =
         if (clazz == currentClass) gen.mkAttributedThis(clazz)
@@ -362,7 +362,7 @@ abstract class LambdaLift extends InfoTransform {
 
     private def proxyRef(sym: Symbol) = {
       val psym = proxy(sym)
-      if (psym.isLocal) gen.mkAttributedIdent(psym) else memberRef(psym)
+      if (psym.isLocalToBlock) gen.mkAttributedIdent(psym) else memberRef(psym)
     }
 
     private def addFreeArgs(pos: Position, sym: Symbol, args: List[Tree]) = {
@@ -436,12 +436,21 @@ abstract class LambdaLift extends InfoTransform {
     private def liftDef(tree: Tree): Tree = {
       val sym = tree.symbol
       val oldOwner = sym.owner
-      if (sym.owner.isAuxiliaryConstructor && sym.isMethod)  // # bug 1909
-    	  sym setFlag STATIC
+      if (sym.isMethod && isUnderConstruction(sym.owner.owner)) { // # bug 1909
+         if (sym.isModule) { // Yes, it can be a module and a method, see comments on `isModuleNotMethod`!
+           // TODO promote to an implementation restriction if we can reason that this *always* leads to VerifyError.
+           // See neg/t1909-object.scala
+           def msg = s"SI-1909 Unable to STATICally lift $sym, which is defined in the self- or super-constructor call of ${sym.owner.owner}. A VerifyError is likely."
+           devWarning(tree.pos, msg)
+          } else sym setFlag STATIC
+      }
+
       sym.owner = sym.owner.enclClass
       if (sym.isClass) sym.owner = sym.owner.toInterface
       if (sym.isMethod) sym setFlag LIFTED
       liftedDefs(sym.owner) ::= tree
+      // TODO: this modifies the ClassInfotype of the enclosing class, which is associated with another phase (explicitouter).
+      // This breaks type history: in a phase travel to before lambda lift, the ClassInfoType will contain lifted classes.
       sym.owner.info.decls enterUnique sym
       debuglog("lifted: " + sym + " from " + oldOwner + " to " + sym.owner)
       EmptyTree
@@ -452,10 +461,10 @@ abstract class LambdaLift extends InfoTransform {
       tree match {
         case ClassDef(_, _, _, _) =>
           val tree1 = addFreeParams(tree, sym)
-          if (sym.isLocal) liftDef(tree1) else tree1
+          if (sym.isLocalToBlock) liftDef(tree1) else tree1
         case DefDef(_, _, _, _, _, _) =>
           val tree1 = addFreeParams(tree, sym)
-          if (sym.isLocal) liftDef(tree1) else tree1
+          if (sym.isLocalToBlock) liftDef(tree1) else tree1
         case ValDef(mods, name, tpt, rhs) =>
           if (sym.isCapturedVariable) {
             val tpt1 = TypeTree(sym.tpe) setPos tpt.pos
@@ -492,7 +501,7 @@ abstract class LambdaLift extends InfoTransform {
             if (sym.isTerm && !sym.isLabel)
               if (sym.isMethod)
                 atPos(tree.pos)(memberRef(sym))
-              else if (sym.isLocal && !isSameOwnerEnclosure(sym))
+              else if (sym.isLocalToBlock && !isSameOwnerEnclosure(sym))
                 atPos(tree.pos)(proxyRef(sym))
               else tree
             else tree

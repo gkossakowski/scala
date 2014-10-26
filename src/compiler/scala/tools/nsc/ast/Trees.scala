@@ -6,6 +6,7 @@
 package scala.tools.nsc
 package ast
 
+import scala.reflect.ClassTag
 import scala.reflect.internal.Flags.BYNAMEPARAM
 import scala.reflect.internal.Flags.DEFAULTPARAM
 import scala.reflect.internal.Flags.IMPLICIT
@@ -70,7 +71,7 @@ trait Trees extends scala.reflect.internal.Trees { self: Global =>
 
     ClassDef(sym,
       gen.mkTemplate(sym.info.parents map TypeTree,
-                    if (sym.thisSym == sym || phase.erasedTypes) emptyValDef else ValDef(sym.thisSym),
+                    if (sym.thisSym == sym || phase.erasedTypes) noSelfType else ValDef(sym.thisSym),
                     constrMods, vparamss, body, superPos))
   }
 
@@ -79,8 +80,6 @@ trait Trees extends scala.reflect.internal.Trees { self: Global =>
   object treeInfo extends {
     val global: Trees.this.type = self
   } with TreeInfo
-
-  lazy val treePrinter = newTreePrinter()
 
   // --- additional cases in operations ----------------------------------
 
@@ -104,6 +103,7 @@ trait Trees extends scala.reflect.internal.Trees { self: Global =>
     def InjectDerivedValue(tree: Tree, arg: Tree): InjectDerivedValue
     def TypeTreeWithDeferredRefCheck(tree: Tree): TypeTreeWithDeferredRefCheck
   }
+  implicit val TreeCopierTag: ClassTag[TreeCopier] = ClassTag[TreeCopier](classOf[TreeCopier])
 
   def newStrictTreeCopier: TreeCopier = new StrictTreeCopier
   def newLazyTreeCopier: TreeCopier = new LazyTreeCopier
@@ -178,14 +178,34 @@ trait Trees extends scala.reflect.internal.Trees { self: Global =>
     }
   }
 
-  /** resets symbol and tpe fields in a tree, @see ResetAttrs
-   */
-//  def resetAllAttrs[A<:Tree](x:A): A = { new ResetAttrsTraverser().traverse(x); x }
-//  def resetLocalAttrs[A<:Tree](x:A): A = { new ResetLocalAttrsTraverser().traverse(x); x }
+  // Finally, noone resetAllAttrs it anymore, so I'm removing it from the compiler.
+  // Even though it's with great pleasure I'm doing that, I'll leave its body here to warn future generations about what happened in the past.
+  //
+  // So what actually happened in the past is that we used to have two flavors of resetAttrs: resetAllAttrs and resetLocalAttrs.
+  // resetAllAttrs destroyed all symbols and types in the tree in order to reset its state to something suitable for retypechecking
+  // and/or embedding into bigger trees / different lexical scopes. (Btw here's some background on why people would want to use
+  // reset attrs in the first place: https://groups.google.com/forum/#!topic/scala-internals/TtCTPlj_qcQ).
+  //
+  // However resetAllAttrs was more of a poison than of a treatment, because along with locally defined symbols that are the cause
+  // for almost every or maybe even every case of tree corruption, it erased external bindings that sometimes could not be restored.
+  // This is how we came up with resetLocalAttrs that left external bindings alone, and that was a big step forward.
+  // Then slowly but steadily we've evicted all usages of resetAllAttrs from our codebase in favor of resetLocalAttrs
+  // and have been living happily ever after.
+  //
+  // def resetAllAttrs(x: Tree, leaveAlone: Tree => Boolean = null): Tree = new ResetAttrs(localOnly = false, leaveAlone).transform(x)
 
-  def resetAllAttrs(x: Tree, leaveAlone: Tree => Boolean = null): Tree = new ResetAttrs(false, leaveAlone).transform(x)
-  def resetLocalAttrs(x: Tree, leaveAlone: Tree => Boolean = null): Tree = new ResetAttrs(true, leaveAlone).transform(x)
-  def resetLocalAttrsKeepLabels(x: Tree, leaveAlone: Tree => Boolean = null): Tree = new ResetAttrs(true, leaveAlone, true).transform(x)
+  // upd. Unfortunately this didn't work out quite as we expected. The last two users of resetAllAttrs:
+  // reification and typedLabelDef broke in very weird ways when we replaced resetAllAttrs with resetLocalAttrs
+  // (see SI-8316 change from resetAllAttrs to resetLocalAttrs in reifiers broke Slick and
+  // SI-8318 NPE in mixin in scala-continuations for more information).
+  // Given that we're supposed to release 2.11.0-RC1 in less than a week, I'm temporarily reinstating resetAllAttrs
+  // until we have time to better understand what's going on. In order to dissuade people from using it,
+  // it now comes with a new, ridiculous name.
+  /** @see ResetAttrs */
+  def brutallyResetAttrs(x: Tree, leaveAlone: Tree => Boolean = null): Tree = new ResetAttrs(brutally = true, leaveAlone).transform(x)
+
+  /** @see ResetAttrs */
+  def resetAttrs(x: Tree): Tree = new ResetAttrs(brutally = false, leaveAlone = null).transform(x)
 
   /** A transformer which resets symbol and tpe fields of all nodes in a given tree,
    *  with special treatment of:
@@ -196,8 +216,10 @@ trait Trees extends scala.reflect.internal.Trees { self: Global =>
    *
    *  (bq:) This transformer has mutable state and should be discarded after use
    */
-  private class ResetAttrs(localOnly: Boolean, leaveAlone: Tree => Boolean = null, keepLabels: Boolean = false) {
-    val debug = settings.debug.value
+  private class ResetAttrs(brutally: Boolean, leaveAlone: Tree => Boolean) {
+    // this used to be based on -Ydebug, but the need for logging in this code is so situational
+    // that I've reverted to a hard-coded constant here.
+    val debug = false
     val trace = scala.tools.nsc.util.trace when debug
 
     val locals = util.HashSet[Symbol](8)
@@ -218,6 +240,7 @@ trait Trees extends scala.reflect.internal.Trees { self: Global =>
           registerLocal(sym.moduleClass)
           registerLocal(sym.companionClass)
           registerLocal(sym.companionModule)
+          registerLocal(sym.deSkolemize)
           sym match {
             case sym: TermSymbol => registerLocal(sym.referenced)
             case _ => ;
@@ -278,29 +301,18 @@ trait Trees extends scala.reflect.internal.Trees { self: Global =>
                 // vetoXXX local variables declared below describe the conditions under which we cannot erase symbols.
                 //
                 // The first reason to not erase symbols is the threat of non-idempotency (SI-5464).
-                // Here we take care of labels (SI-5562) and references to package classes (SI-5705).
+                // Here we take care of references to package classes (SI-5705).
                 // There are other non-idempotencies, but they are not worked around yet.
                 //
-                // The second reason has to do with the fact that resetAttrs itself has limited usefulness.
-                //
-                // First of all, why do we need resetAttrs? Gor one, it's absolutely required to move trees around.
-                // One cannot just take a typed tree from one lexical context and transplant it somewhere else.
-                // Most likely symbols defined by those trees will become borked and the compiler will blow up (SI-5797).
-                // To work around we just erase all symbols and types and then hope that we'll be able to correctly retypecheck.
-                // For ones who're not affected by scalac Stockholm syndrome, this might seem to be an extremely naive fix, but well...
-                //
-                // Of course, sometimes erasing everything won't work, because if a given identifier got resolved to something
-                // in one lexical scope, it can get resolved to something else.
-                //
-                // What do we do in these cases? Enter the workaround for the workaround: resetLocalAttrs, which only destroys
-                // locally defined symbols, but doesn't touch references to stuff declared outside of a given tree.
-                // That's what localOnly and vetoScope are for.
+                // The second reason has to do with the fact that resetAttrs needs to be less destructive.
+                // Erasing locally-defined symbols is useful to prevent tree corruption, but erasing external bindings is not,
+                // therefore we want to retain those bindings, especially given that restoring them can be impossible
+                // if we move these trees into lexical contexts different from their original locations.
                 if (dupl.hasSymbol) {
                   val sym = dupl.symbol
-                  val vetoScope = localOnly && !(locals contains sym)
-                  val vetoLabel = keepLabels && sym.isLabel
+                  val vetoScope = !brutally && !(locals contains sym) && !(locals contains sym.deSkolemize)
                   val vetoThis = dupl.isInstanceOf[This] && sym.isPackageClass
-                  if (!(vetoScope || vetoLabel || vetoThis)) dupl.symbol = NoSymbol
+                  if (!(vetoScope || vetoThis)) dupl.symbol = NoSymbol
                 }
                 dupl.clearType()
             }
@@ -309,10 +321,9 @@ trait Trees extends scala.reflect.internal.Trees { self: Global =>
     }
 
     def transform(x: Tree): Tree = {
-      if (localOnly)
       new MarkLocals().traverse(x)
 
-      if (localOnly && debug) {
+      if (debug) {
         assert(locals.size == orderedLocals.size)
         val msg = orderedLocals.toList filter {_ != NoSymbol} map {"  " + _} mkString EOL
         trace("locals (%d total): %n".format(orderedLocals.size))(msg)

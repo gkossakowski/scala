@@ -49,21 +49,6 @@ abstract class TreeBrowsers {
    * Java Swing pretty printer for Scala abstract syntax trees.
    */
   class SwingBrowser {
-
-    def browse(t: Tree): Tree = {
-      val tm = new ASTTreeModel(t)
-
-      val frame = new BrowserFrame()
-      frame.setTreeModel(tm)
-
-      val lock = new Lock()
-      frame.createFrame(lock)
-
-      // wait for the frame to be closed
-      lock.acquire()
-      t
-    }
-
     def browse(pName: String, units: Iterator[CompilationUnit]): Unit =
       browse(pName, units.toList)
 
@@ -634,7 +619,7 @@ abstract class TreeBrowsers {
                         toDocument(result) :: ")")
         )
 
-      case AnnotatedType(annots, tp, _) =>
+      case AnnotatedType(annots, tp) =>
         Document.group(
           Document.nest(4, "AnnotatedType(" :/:
                         annots.mkString("[", ",", "]") :/:
@@ -647,7 +632,7 @@ abstract class TreeBrowsers {
                 Document.group("(" :/: symsToDocument(tparams) :/: "), ") :/:
                 toDocument(result) :: ")"))
 
-      case global.analyzer.ImportType(expr) =>
+      case ImportType(expr) =>
         "ImportType(" + expr.toString + ")"
 
 

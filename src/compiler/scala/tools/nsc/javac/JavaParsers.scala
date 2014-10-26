@@ -8,11 +8,11 @@
 package scala.tools.nsc
 package javac
 
-import scala.reflect.internal.util.OffsetPosition
 import scala.collection.mutable.ListBuffer
 import symtab.Flags
 import JavaTokens._
 import scala.language.implicitConversions
+import scala.reflect.internal.util.Position
 
 trait JavaParsers extends ast.parser.ParsersCommon with JavaScanners {
   val global : Global
@@ -26,10 +26,10 @@ trait JavaParsers extends ast.parser.ParsersCommon with JavaScanners {
     def freshName(prefix: String): Name = freshTermName(prefix)
     def freshTermName(prefix: String): TermName = unit.freshTermName(prefix)
     def freshTypeName(prefix: String): TypeName = unit.freshTypeName(prefix)
-    def deprecationWarning(off: Int, msg: String) = unit.deprecationWarning(off, msg)
-    implicit def i2p(offset : Int) : Position = new OffsetPosition(unit.source, offset)
-    def warning(pos : Int, msg : String) : Unit = unit.warning(pos, msg)
-    def syntaxError(pos: Int, msg: String) : Unit = unit.error(pos, msg)
+    def deprecationWarning(off: Int, msg: String) = currentRun.reporting.deprecationWarning(off, msg)
+    implicit def i2p(offset : Int) : Position = Position.offset(unit.source, offset)
+    def warning(pos : Int, msg : String) : Unit = reporter.warning(pos, msg)
+    def syntaxError(pos: Int, msg: String) : Unit = reporter.error(pos, msg)
   }
 
   abstract class JavaParser extends ParserCommon {
@@ -118,7 +118,7 @@ trait JavaParsers extends ast.parser.ParsersCommon with JavaScanners {
     def makeTemplate(parents: List[Tree], stats: List[Tree]) =
       Template(
         parents,
-        emptyValDef,
+        noSelfType,
         if (treeInfo.firstConstructor(stats) == EmptyTree) makeConstructor(List()) :: stats
         else stats)
 
@@ -190,7 +190,7 @@ trait JavaParsers extends ast.parser.ParsersCommon with JavaScanners {
         case GTGTGT   => GTGT
         case GTGTEQ   => GTEQ
         case GTGT     => GT
-        case GTEQ     => ASSIGN
+        case GTEQ     => EQUALS
       }
       if (closers isDefinedAt in.token) in.token = closers(in.token)
       else accept(GT)
@@ -417,7 +417,7 @@ trait JavaParsers extends ast.parser.ParsersCommon with JavaScanners {
         }
         val ts = buf.toList
         if (ts.tail.isEmpty) ts.head
-        else CompoundTypeTree(Template(ts, emptyValDef, List()))
+        else CompoundTypeTree(Template(ts, noSelfType, List()))
       }
 
     def formalParams(): List[ValDef] = {
@@ -488,7 +488,8 @@ trait JavaParsers extends ast.parser.ParsersCommon with JavaScanners {
           val vparams = formalParams()
           if (!isVoid) rtpt = optArrayBrackets(rtpt)
           optThrows()
-          val bodyOk = !inInterface || (mods hasFlag Flags.DEFAULTMETHOD)
+          val isStatic = mods hasFlag Flags.STATIC
+          val bodyOk = !inInterface || ((mods hasFlag Flags.DEFAULTMETHOD) || isStatic)
           val body =
             if (bodyOk && in.token == LBRACE) {
               methodBody()
@@ -507,7 +508,7 @@ trait JavaParsers extends ast.parser.ParsersCommon with JavaScanners {
                 EmptyTree
               }
             }
-          if (inInterface) mods1 |= Flags.DEFERRED
+          if (inInterface && !isStatic) mods1 |= Flags.DEFERRED
           List {
             atPos(pos) {
               DefDef(mods1, name.toTermName, tparams, List(vparams), rtpt, body)
@@ -538,7 +539,7 @@ trait JavaParsers extends ast.parser.ParsersCommon with JavaScanners {
         in.nextToken()
         if (in.token == IDENTIFIER) { // if there's an ident after the comma ...
           val name = ident()
-          if (in.token == ASSIGN || in.token == SEMI) { // ... followed by a `=` or `;`, we know it's a real variable definition
+          if (in.token == EQUALS || in.token == SEMI) { // ... followed by a `=` or `;`, we know it's a real variable definition
             buf ++= maybe
             buf += varDecl(in.currentPos, mods, tpt.duplicate, name.toTermName)
             maybe.clear()
@@ -563,7 +564,7 @@ trait JavaParsers extends ast.parser.ParsersCommon with JavaScanners {
 
     def varDecl(pos: Position, mods: Modifiers, tpt: Tree, name: TermName): ValDef = {
       val tpt1 = optArrayBrackets(tpt)
-      if (in.token == ASSIGN && !mods.isParameter) skipTo(COMMA, SEMI)
+      if (in.token == EQUALS && !mods.isParameter) skipTo(COMMA, SEMI)
       val mods1 = if (mods.isFinal) mods &~ Flags.FINAL else mods | Flags.MUTABLE
       atPos(pos) {
         ValDef(mods1, name, tpt1, blankExpr)
@@ -792,7 +793,7 @@ trait JavaParsers extends ast.parser.ParsersCommon with JavaScanners {
       val superclazz =
         AppliedTypeTree(javaLangDot(tpnme.Enum), List(enumType))
       addCompanionObject(consts ::: statics ::: predefs, atPos(pos) {
-        ClassDef(mods, name, List(),
+        ClassDef(mods | Flags.ENUM, name, List(),
                  makeTemplate(superclazz :: interfaces, body))
       })
     }
@@ -811,10 +812,7 @@ trait JavaParsers extends ast.parser.ParsersCommon with JavaScanners {
           skipAhead()
           accept(RBRACE)
         }
-        // The STABLE flag is to signal to namer that this was read from a
-        // java enum, and so should be given a Constant type (thereby making
-        // it usable in annotations.)
-        ValDef(Modifiers(Flags.STABLE | Flags.JAVA | Flags.STATIC), name.toTermName, enumType, blankExpr)
+        ValDef(Modifiers(Flags.ENUM | Flags.STABLE | Flags.JAVA | Flags.STATIC), name.toTermName, enumType, blankExpr)
       }
     }
 

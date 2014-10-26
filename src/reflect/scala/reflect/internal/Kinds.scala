@@ -185,6 +185,7 @@ trait Kinds {
           )
         }
         else {
+          hkarg.initialize // SI-7902 otherwise hkarg.typeParams yields List(NoSymbol)!
           debuglog("checkKindBoundsHK recursing to compare params of "+ hkparam +" with "+ hkarg)
           kindErrors ++= checkKindBoundsHK(
             hkarg.typeParams,
@@ -325,6 +326,8 @@ trait Kinds {
     private[internal] object StringState {
       def empty: StringState = StringState(Seq())
     }
+    def FromParams(tparams: List[Symbol]): Type = GenPolyType(tparams, AnyTpe)
+    def Wildcard: Type                          = WildcardType
   }
   class ProperTypeKind(val bounds: TypeBounds) extends Kind {
     import Kind.StringState

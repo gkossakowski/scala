@@ -141,12 +141,12 @@ trait MatchOptimization extends MatchTreeMaking with MatchAnalysis {
     object ReusedCondTreeMaker {
       def apply(orig: CondTreeMaker) = new ReusedCondTreeMaker(orig.prevBinder, orig.nextBinder, orig.cond, orig.res, orig.pos)
     }
-    class ReusedCondTreeMaker(prevBinder: Symbol, val nextBinder: Symbol, cond: Tree, res: Tree, val pos: Position) extends TreeMaker { import CODE._
+    class ReusedCondTreeMaker(prevBinder: Symbol, val nextBinder: Symbol, cond: Tree, res: Tree, val pos: Position) extends TreeMaker {
       lazy val localSubstitution        = Substitution(List(prevBinder), List(CODE.REF(nextBinder)))
       lazy val storedCond               = freshSym(pos, BooleanTpe, "rc") setFlag MUTABLE
       lazy val treesToHoist: List[Tree] = {
         nextBinder setFlag MUTABLE
-        List(storedCond, nextBinder) map { b => VAL(b) === codegen.mkZero(b.info) }
+        List(storedCond, nextBinder) map (b => ValDef(b, codegen.mkZero(b.info)))
       }
 
       // TODO: finer-grained duplication
@@ -232,9 +232,6 @@ trait MatchOptimization extends MatchTreeMaking with MatchAnalysis {
       def defaultSym: Symbol
       def defaultBody: Tree
       def defaultCase(scrutSym: Symbol = defaultSym, guard: Tree = EmptyTree, body: Tree = defaultBody): CaseDef
-
-      private def sequence[T](xs: List[Option[T]]): Option[List[T]] =
-        if (xs exists (_.isEmpty)) None else Some(xs.flatten)
 
       object GuardAndBodyTreeMakers {
           def unapply(tms: List[TreeMaker]): Option[(Tree, Tree)] = {
@@ -402,23 +399,15 @@ trait MatchOptimization extends MatchTreeMaking with MatchAnalysis {
       private def noGuards(cs: List[CaseDef]): Boolean = !cs.exists(isGuardedCase)
 
       // must do this before removing guards from cases and collapsing (SI-6011, SI-6048)
-      private def unreachableCase(cs: List[CaseDef]): Option[CaseDef] = {
-        var cases = cs
-        var unreachable: Option[CaseDef] = None
-
-        while (cases.nonEmpty && unreachable.isEmpty) {
-          val currCase = cases.head
-          if (isDefault(currCase) && cases.tail.nonEmpty) // subsumed by the `else if` that follows, but faster
-            unreachable = Some(cases.tail.head)
-          else if (!isGuardedCase(currCase) || currCase.guard.tpe =:= ConstantType(Constant(true)))
-            unreachable = cases.tail.find(caseImplies(currCase))
-          else if (currCase.guard.tpe =:= ConstantType(Constant(false)))
-            unreachable = Some(currCase)
-
-          cases = cases.tail
+      private def unreachableCase(cases: List[CaseDef]): Option[CaseDef] = {
+        def loop(cases: List[CaseDef]): Option[CaseDef] = cases match {
+          case head :: next :: _ if isDefault(head)                                    => Some(next) // subsumed by the next case, but faster
+          case head :: rest if !isGuardedCase(head) || head.guard.tpe =:= ConstantTrue => rest find caseImplies(head) orElse loop(rest)
+          case head :: _ if head.guard.tpe =:= ConstantFalse                           => Some(head)
+          case _ :: rest                                                               => loop(rest)
+          case _                                                                       => None
         }
-
-        unreachable
+        loop(cases)
       }
 
       // empty list ==> failure
@@ -453,7 +442,7 @@ trait MatchOptimization extends MatchTreeMaking with MatchAnalysis {
                   val distinctAlts = distinctBy(switchableAlts)(extractConst)
                   if (distinctAlts.size < switchableAlts.size) {
                     val duplicated = switchableAlts.groupBy(extractConst).flatMap(_._2.drop(1).take(1)) // report the first duplicated
-                    global.currentUnit.warning(pos, s"Pattern contains duplicate alternatives: ${duplicated.mkString(", ")}")
+                    reporter.warning(pos, s"Pattern contains duplicate alternatives: ${duplicated.mkString(", ")}")
                   }
                   CaseDef(Alternative(distinctAlts), guard, body)
                 }
@@ -528,7 +517,7 @@ trait MatchOptimization extends MatchTreeMaking with MatchAnalysis {
       }
 
       def defaultSym: Symbol = scrutSym
-      def defaultBody: Tree  = { import CODE._; matchFailGenOverride map (gen => gen(REF(scrutSym))) getOrElse MATCHERROR(REF(scrutSym)) }
+      def defaultBody: Tree  = { import CODE._; matchFailGenOverride map (gen => gen(REF(scrutSym))) getOrElse Throw(MatchErrorClass.tpe, REF(scrutSym)) }
       def defaultCase(scrutSym: Symbol = defaultSym, guard: Tree = EmptyTree, body: Tree = defaultBody): CaseDef = { import CODE._; atPos(body.pos) {
         (DEFAULT IF guard) ==> body
       }}
@@ -546,7 +535,7 @@ trait MatchOptimization extends MatchTreeMaking with MatchAnalysis {
             if (scrutSym.tpe =:= IntTpe) REF(scrutSym)
             else (REF(scrutSym) DOT (nme.toInt))
           Some(BLOCK(
-            VAL(scrutSym) === scrut,
+            ValDef(scrutSym, scrut),
             Match(scrutToInt, caseDefsWithDefault) // a switch
           ))
         }

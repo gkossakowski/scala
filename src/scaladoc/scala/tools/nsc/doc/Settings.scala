@@ -66,7 +66,7 @@ class Settings(error: String => Unit, val printMsg: String => Unit = println(_))
   val docsourceurl = StringSetting (
     "-doc-source-url",
     "url",
-    "A URL pattern used to build links to template sources; use variables, for example: ?{TPL_NAME} ('Seq'), ?{TPL_OWNER} ('scala.collection'), ?{FILE_PATH} ('scala/collection/Seq')",
+    s"A URL pattern used to link to the source file; the following variables are available: €{TPL_NAME}, €{TPL_OWNER} and respectively €{FILE_PATH}. For example, for `scala.collection.Seq`, the variables will be expanded to `Seq`, `scala.collection` and respectively `scala/collection/Seq` (without the backquotes). To obtain a relative path for €{FILE_PATH} instead of an absolute one, use the ${sourcepath.name} setting.",
     ""
   )
 
@@ -120,6 +120,11 @@ class Settings(error: String => Unit, val printMsg: String => Unit = println(_))
 	  "-implicits-hide",
     "implicit(s)",
     "Hide the members inherited by the given comma separated, fully qualified implicit conversions. Add dot (.) to include default conversions."
+  )
+
+  val docAuthor = BooleanSetting (
+    "-author",
+    "Include authors."
   )
 
   val docDiagrams = BooleanSetting (
@@ -207,7 +212,7 @@ class Settings(error: String => Unit, val printMsg: String => Unit = println(_))
   // For improved help output.
   def scaladocSpecific = Set[Settings#Setting](
     docformat, doctitle, docfooter, docversion, docUncompilable, docsourceurl, docgenerator, docRootContent, useStupidTypes,
-    docDiagrams, docDiagramsDebug, docDiagramsDotPath,
+    docAuthor, docDiagrams, docDiagramsDebug, docDiagramsDotPath,
     docDiagramsDotTimeout, docDiagramsDotRestart,
     docImplicits, docImplicitsDebug, docImplicitsShowAll, docImplicitsHide,
     docDiagramsMaxNormalClasses, docDiagramsMaxImplicitClasses,
@@ -244,7 +249,7 @@ class Settings(error: String => Unit, val printMsg: String => Unit = println(_))
     val idx = s.indexOf("#")
     if (idx > 0) {
       val (first, last) = s.splitAt(idx)
-      Some(new File(first).getAbsolutePath -> appendIndex(last.substring(1)))
+      Some(new File(first).getCanonicalPath -> appendIndex(last.substring(1)))
     } else {
       error(s"Illegal -doc-external-doc option; expected a pair with '#' separator, found: '$s'")
       None
@@ -293,7 +298,7 @@ class Settings(error: String => Unit, val printMsg: String => Unit = println(_))
     /** Common conversion targets that affect any class in Scala */
     val commonConversionTargets = Set(
       "scala.Predef.StringFormat",
-      "scala.Predef.StringAdd",
+      "scala.Predef.any2stringadd",
       "scala.Predef.ArrowAssoc",
       "scala.Predef.Ensuring",
       "scala.collection.TraversableOnce.alternateImplicit")

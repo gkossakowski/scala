@@ -1,11 +1,5 @@
-import org.scalacheck._
-import Prop._
-import Gen._
-import Arbitrary._
-
-import scala.reflect.api._
-import scala.reflect.runtime.universe._
-import scala.reflect.runtime.universe.Flag._
+import org.scalacheck._, Prop._, Gen._, Arbitrary._
+import scala.reflect.runtime.universe._, internal._, Flag._
 
 trait ArbitraryTreesAndNames {
   def smallList[T](size: Int, g: Gen[T]) = {
@@ -98,7 +92,7 @@ trait ArbitraryTreesAndNames {
       yield DefDef(mods, name, tparams, vparamss, tpt, rhs)
 
   def genExistentialTypeTree(size: Int) =
-    for(tpt <- genTree(size - 1); where <- smallList(size, genTree(size - 1)))
+    for(tpt <- genTree(size - 1); where <- smallList(size, oneOf(genValDef(size - 1), genTypeDef(size - 1))))
       yield ExistentialTypeTree(tpt, where)
 
   def genFunction(size: Int) =
@@ -227,7 +221,7 @@ trait ArbitraryTreesAndNames {
       yield ValDef(mods, name, tpt, rhs)
 
   def genTree(size: Int): Gen[Tree] =
-    if (size <= 1) oneOf(EmptyTree, genTreeIsTerm(size), genTreeIsType(size))
+    if (size <= 1) oneOf(EmptyTree: Gen[Tree], genTreeIsTerm(size), genTreeIsType(size))
     else oneOf(genTree(1),
                // these trees are neither terms nor types
                genPackageDef(size - 1), genModuleDef(size - 1),
@@ -257,7 +251,7 @@ trait ArbitraryTreesAndNames {
 
   /*  These are marker types that allow to write tests that
    *  depend specificly on Trees that are terms or types.
-   *  They are transperantly tranformed to trees through
+   *  They are transparently tranformed to trees through
    *  implicit conversions and liftables for quasiquotes.
    */
 
@@ -270,16 +264,10 @@ trait ArbitraryTreesAndNames {
   def genTreeIsTypeWrapped(size: Int) =
     for(tit <- genTreeIsType(size)) yield TreeIsType(tit)
 
-  implicit object liftTreeIsTerm extends Liftable[TreeIsTerm] {
-    def apply(universe: Universe, value: TreeIsTerm): universe.Tree =
-      value.tree.asInstanceOf[universe.Tree]
-  }
-  implicit object liftTreeIsType extends Liftable[TreeIsType] {
-    def apply(universe: Universe, value: TreeIsType): universe.Tree =
-      value.tree.asInstanceOf[universe.Tree]
-  }
-  implicit def treeIsTerm2tree(tit: TreeIsTerm) = tit.tree
-  implicit def treeIsType2tree(tit: TreeIsType) = tit.tree
+  implicit val liftTreeIsTerm = Liftable[TreeIsTerm] { _.tree }
+  implicit val liftTreeIsType = Liftable[TreeIsType] { _.tree }
+  implicit def treeIsTerm2tree(tit: TreeIsTerm): Tree = tit.tree
+  implicit def treeIsType2tree(tit: TreeIsType): Tree = tit.tree
 
   implicit val arbConstant: Arbitrary[Constant] = Arbitrary(genConstant)
   implicit val arbModifiers: Arbitrary[Modifiers] = Arbitrary(genModifiers)

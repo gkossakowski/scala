@@ -39,19 +39,14 @@ trait GenTrees {
     //
     // why bother? because this brings method to the madness
     // the first prototype of reification reified all types and symbols for all trees => this quickly became unyieldy
-    // the second prototype reified external types, but avoided reifying local ones => this created an ugly irregularity
+    // the second prototype reified external types, but avoided reifying ones local to the reifee => this created an ugly irregularity
     // current approach is uniform and compact
-    var rtree = tree match {
-      case FreeDef(_, _, _, _, _) =>
-        reifyNestedFreeDef(tree)
-      case FreeRef(_, _) =>
-        reifyNestedFreeRef(tree)
-      case BoundTerm(tree) =>
-        reifyBoundTerm(tree)
-      case BoundType(tree) =>
-        reifyBoundType(tree)
-      case _ =>
-        reifyTreeSyntactically(tree)
+    var rtree: Tree = tree match {
+      case FreeDef(_, _, _, _, _) => reifyNestedFreeDef(tree)
+      case FreeRef(_, _)          => reifyNestedFreeRef(tree)
+      case BoundTerm(tree)        => reifyBoundTerm(tree)
+      case BoundType(tree)        => reifyBoundType(tree)
+      case _                      => reifyTreeSyntactically(tree)
     }
 
     // usually we don't reify symbols/types, because they can be re-inferred during subsequent reflective compilation
@@ -68,23 +63,21 @@ trait GenTrees {
     rtree
   }
 
-  def reifyTreeSyntactically(tree: Tree) = tree match {
-    case global.EmptyTree =>
-      reifyMirrorObject(EmptyTree)
-    case global.emptyValDef =>
-      mirrorSelect(nme.emptyValDef)
-    case global.pendingSuperCall =>
-      mirrorSelect(nme.pendingSuperCall)
-    case Literal(const @ Constant(_)) =>
-      mirrorCall(nme.Literal, reifyProduct(const))
-    case Import(expr, selectors) =>
-      mirrorCall(nme.Import, reify(expr), mkList(selectors map reifyProduct))
-    case _ =>
-      reifyProduct(tree)
+  def reifyTreeSyntactically(tree: Tree): Tree = tree match {
+    case global.EmptyTree             => reifyMirrorObject(EmptyTree)
+    case global.noSelfType            => mirrorSelect(nme.noSelfType)
+    case global.pendingSuperCall      => mirrorSelect(nme.pendingSuperCall)
+    case Literal(const @ Constant(_)) => mirrorCall(nme.Literal, reifyProduct(const))
+    case Import(expr, selectors)      => mirrorCall(nme.Import, reify(expr), mkList(selectors map reifyProduct))
+    case _                            => reifyProduct(tree)
   }
 
+  def reifyFlags(flags: FlagSet) =
+    if (flags != 0) reifyBuildCall(nme.FlagsRepr, flags) else mirrorSelect(nme.NoFlags)
+
   def reifyModifiers(m: global.Modifiers) =
-    mirrorFactoryCall(nme.Modifiers, mirrorBuildCall(nme.flagsFromBits, reify(m.flags)), reify(m.privateWithin), reify(m.annotations))
+    if (m == NoMods) mirrorSelect(nme.NoMods)
+    else mirrorFactoryCall(nme.Modifiers, reifyFlags(m.flags), reify(m.privateWithin), reify(m.annotations))
 
   private def spliceTree(tree: Tree): Tree = {
     tree match {
@@ -109,7 +102,7 @@ trait GenTrees {
               if (reifyDebug) println("inlining the splicee")
               // all free vars local to the enclosing reifee should've already been inlined by `Metalevels`
               for (sym <- inlinedSymtab.syms if sym.isLocalToReifee)
-                abort("local free var, should have already been inlined by Metalevels: " + inlinedSymtab.symDef(sym))
+                abort("free var local to the reifee, should have already been inlined by Metalevels: " + inlinedSymtab.symDef(sym))
               state.symtab ++= inlinedSymtab
               rtree
             case tree =>
@@ -136,32 +129,32 @@ trait GenTrees {
         else if (sym.isClass && !sym.isModuleClass) {
           if (reifyDebug) println("This for %s, reified as freeVar".format(sym))
           if (reifyDebug) println("Free: " + sym)
-          mirrorBuildCall(nme.Ident, reifyFreeTerm(This(sym)))
+          mirrorBuildCall(nme.mkIdent, reifyFreeTerm(This(sym)))
         }
         else {
           if (reifyDebug) println("This for %s, reified as This".format(sym))
-          mirrorBuildCall(nme.This, reify(sym))
+          mirrorBuildCall(nme.mkThis, reify(sym))
         }
 
       case Ident(name) =>
         if (sym == NoSymbol) {
           // this sometimes happens, e.g. for binds that don't have a body
           // or for untyped code generated during previous phases
-          // (see a comment in Reifiers about the latter, starting with "why do we resetAllAttrs?")
+          // (see a comment in Reifiers about the latter, starting with "why do we reset attrs?")
           mirrorCall(nme.Ident, reify(name))
         }
         else if (!sym.isLocalToReifee) {
           if (sym.isVariable && sym.owner.isTerm) {
             captureVariable(sym) // Note order dependency: captureVariable needs to come before reification here.
-            mirrorCall(nme.Select, mirrorBuildCall(nme.Ident, reify(sym)), reify(nme.elem))
+            mirrorCall(nme.Select, mirrorBuildCall(nme.mkIdent, reify(sym)), reify(nme.elem))
           }
-          else mirrorBuildCall(nme.Ident, reify(sym))
+          else mirrorBuildCall(nme.mkIdent, reify(sym))
         }
         else mirrorCall(nme.Ident, reify(name))
 
       case Select(qual, name) =>
         if (qual.symbol != null && qual.symbol.isPackage) {
-          mirrorBuildCall(nme.Ident, reify(sym))
+          mirrorBuildCall(nme.mkIdent, reify(sym))
         } else {
           val effectiveName = if (sym != null && sym != NoSymbol) sym.name else name
           reifyProduct(Select(qual, effectiveName))
@@ -180,7 +173,7 @@ trait GenTrees {
       assert(tpe != null, "unexpected: bound type that doesn't have a tpe: " + showRaw(tree))
 
       // if a symbol or a type of the scrutinee are local to reifee
-      // (e.g. point to a locally declared class or to a path-dependent thingie that depends on a local variable)
+      // (e.g. point to a locally declared class or to a path-dependent thingie that depends on a variable defined within the reifee)
       // then we can reify the scrutinee as a symless AST and that will definitely be hygienic
       // why? because then typechecking of a scrutinee doesn't depend on the environment external to the quasiquote
       // otherwise we need to reify the corresponding type
@@ -194,7 +187,7 @@ trait GenTrees {
 
           if (spliced == EmptyTree) {
             if (reifyDebug) println("splicing failed: reify as is")
-            mirrorBuildCall(nme.TypeTree, reify(tpe))
+            mirrorBuildCall(nme.mkTypeTree, reify(tpe))
           }
           else spliced match {
             case TypeRefToFreeType(freeType) =>
@@ -202,7 +195,7 @@ trait GenTrees {
               Ident(freeType)
             case _ =>
               if (reifyDebug) println("splicing succeeded: " + spliced)
-              mirrorBuildCall(nme.TypeTree, spliced)
+              mirrorBuildCall(nme.mkTypeTree, spliced)
           }
         }
         else tree match {
@@ -214,10 +207,10 @@ trait GenTrees {
             mirrorCall(nme.SelectFromTypeTree, reify(qual), reify(name))
           case _ if sym.isLocatable =>
             if (reifyDebug) println(s"tpe is locatable: reify as Ident($sym)")
-            mirrorBuildCall(nme.Ident, reify(sym))
+            mirrorBuildCall(nme.mkIdent, reify(sym))
           case _ =>
             if (reifyDebug) println(s"tpe is not locatable: reify as TypeTree($tpe)")
-            mirrorBuildCall(nme.TypeTree, reify(tpe))
+            mirrorBuildCall(nme.mkTypeTree, reify(tpe))
         }
       }
     }

@@ -13,7 +13,7 @@ import symtab.Flags._
 /** This phase converts classes with parameters into Java-like classes with
  *  fields, which are assigned to from constructors.
  */
-abstract class Constructors extends Transform with ast.TreeDSL {
+abstract class Constructors extends Statics with Transform with ast.TreeDSL {
   import global._
   import definitions._
 
@@ -54,7 +54,7 @@ abstract class Constructors extends Transform with ast.TreeDSL {
         def check(tree: Tree) = {
           for (t <- tree) t match {
             case t: RefTree if uninitializedVals(t.symbol.accessedOrSelf) && t.qualifier.symbol == clazz =>
-              unit.warning(t.pos, s"Reference to uninitialized ${t.symbol.accessedOrSelf}")
+              reporter.warning(t.pos, s"Reference to uninitialized ${t.symbol.accessedOrSelf}")
             case _ =>
           }
         }
@@ -174,7 +174,7 @@ abstract class Constructors extends Transform with ast.TreeDSL {
       omittables ++= outerCandidatesForElision
 
       val bodyOfOuterAccessor: Map[Symbol, DefDef] =
-        defBuf collect { case dd: DefDef if outerCandidatesForElision(dd.symbol) => dd.symbol -> dd } toMap
+        defBuf.collect { case dd: DefDef if outerCandidatesForElision(dd.symbol) => dd.symbol -> dd }.toMap
 
       // no point traversing further once omittables is empty, all candidates ruled out already.
       object detectUsages extends Traverser {
@@ -199,7 +199,7 @@ abstract class Constructors extends Transform with ast.TreeDSL {
         detectUsages walk auxConstructorBuf
       }
     }
-    def mustbeKept(sym: Symbol) = !omittables(sym)
+    def mustBeKept(sym: Symbol) = !omittables(sym)
 
   } // OmittablesHelper
 
@@ -362,6 +362,7 @@ abstract class Constructors extends Transform with ast.TreeDSL {
        * be an error to pass it to array_update(.., .., Object).
        */
       def rewriteArrayUpdate(tree: Tree): Tree = {
+        val arrayUpdateMethod = currentRun.runDefinitions.arrayUpdateMethod
         val adapter = new Transformer {
           override def transform(t: Tree): Tree = t match {
             case Apply(fun @ Select(receiver, method), List(xs, idx, v)) if fun.symbol == arrayUpdateMethod =>
@@ -457,7 +458,7 @@ abstract class Constructors extends Transform with ast.TreeDSL {
   } // GuardianOfCtorStmts
 
   private class TemplateTransformer(val unit: CompilationUnit, val impl: Template)
-    extends Transformer
+    extends StaticsTransformer
     with    DelayedInitHelper
     with    OmittablesHelper
     with    GuardianOfCtorStmts {
@@ -606,7 +607,7 @@ abstract class Constructors extends Transform with ast.TreeDSL {
     // follow the primary constructor
     val auxConstructorBuf = new ListBuffer[Tree]
 
-    // The list of statements that go into constructor after and including the superclass constructor call
+    // The list of statements that go into the constructor after and including the superclass constructor call
     val constrStatBuf = new ListBuffer[Tree]
 
     // The list of early initializer statements that go into constructor before the superclass constructor call
@@ -614,6 +615,9 @@ abstract class Constructors extends Transform with ast.TreeDSL {
 
     // The early initialized field definitions of the class (these are the class members)
     val presupers = treeInfo.preSuperFields(stats)
+
+    // The list of statements that go into the class initializer
+    val classInitStatBuf = new ListBuffer[Tree]
 
     // generate code to copy pre-initialized fields
     for (stat <- constrBody.stats) {
@@ -643,7 +647,7 @@ abstract class Constructors extends Transform with ast.TreeDSL {
             else if (stat.symbol.isConstructor) auxConstructorBuf += stat
             else defBuf += stat
         }
-      case ValDef(_, _, _, rhs) =>
+      case ValDef(mods, _, _, rhs) if !mods.hasStaticFlag =>
         // val defs with constant right-hand sides are eliminated.
         // for all other val defs, an empty valdef goes into the template and
         // the initializer goes as an assignment into the constructor
@@ -658,6 +662,11 @@ abstract class Constructors extends Transform with ast.TreeDSL {
           }
           defBuf += deriveValDef(stat)(_ => EmptyTree)
         }
+      case ValDef(_, _, _, rhs) =>
+        // Add static initializer statements to classInitStatBuf and remove the rhs from the val def.
+        classInitStatBuf += mkAssign(stat.symbol, rhs)
+        defBuf += deriveValDef(stat)(_ => EmptyTree)
+
       case ClassDef(_, _, _, _) =>
         // classes are treated recursively, and left in the template
         defBuf += new ConstructorTransformer(unit).transform(stat)
@@ -669,14 +678,14 @@ abstract class Constructors extends Transform with ast.TreeDSL {
     populateOmittables()
 
     // Initialize all parameters fields that must be kept.
-    val paramInits = paramAccessors filter mustbeKept map { acc =>
+    val paramInits = paramAccessors filter mustBeKept map { acc =>
       // Check for conflicting symbol amongst parents: see bug #1960.
       // It would be better to mangle the constructor parameter name since
       // it can only be used internally, but I think we need more robust name
       // mangling before we introduce more of it.
       val conflict = clazz.info.nonPrivateMember(acc.name) filter (s => s.isGetter && !s.isOuterField && s.enclClass.isTrait)
       if (conflict ne NoSymbol)
-        unit.error(acc.pos, "parameter '%s' requires field but conflicts with %s".format(acc.name, conflict.fullLocationString))
+        reporter.error(acc.pos, "parameter '%s' requires field but conflicts with %s".format(acc.name, conflict.fullLocationString))
 
       copyParam(acc, parameter(acc))
     }
@@ -709,11 +718,13 @@ abstract class Constructors extends Transform with ast.TreeDSL {
     defBuf ++= auxConstructorBuf
 
     // Unlink all fields that can be dropped from class scope
-    for (sym <- clazz.info.decls ; if !mustbeKept(sym))
+    for (sym <- clazz.info.decls ; if !mustBeKept(sym))
       clazz.info.decls unlink sym
 
     // Eliminate all field definitions that can be dropped from template
-    val transformed: Template = deriveTemplate(impl)(_ => defBuf.toList filter (stat => mustbeKept(stat.symbol)))
+    val templateWithoutOmittables: Template = deriveTemplate(impl)(_ => defBuf.toList filter (stat => mustBeKept(stat.symbol)))
+    //  Add the static initializers
+    val transformed: Template = addStaticInits(templateWithoutOmittables, classInitStatBuf, localTyper)
 
   } // TemplateTransformer
 

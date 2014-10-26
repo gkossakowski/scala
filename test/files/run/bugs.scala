@@ -46,7 +46,7 @@ object Bug135Test {
 
   def test(args: Array[String]) {
     val myMap:TreeMap[Int, String] = new TreeMap
-    val map1 = myMap + Pair(42, "The answer")
+    val map1 = myMap + ((42, "The answer"))
     println(map1.get(42))
   }
 
@@ -304,7 +304,7 @@ object Bug250Test {
 // Bug 257
 
 object Bug257Test {
-  def sayhello(): Unit = { Console.println("I should come 1st and 2nd"); };  
+  def sayhello(): Unit = { Console.println("I should come 1st and 2nd"); };
   def sayhi(): Unit = { Console.println("I should come last"); };
 
   def f1(x: Unit): Unit = ();

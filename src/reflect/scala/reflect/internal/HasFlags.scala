@@ -81,8 +81,11 @@ trait HasFlags {
   // identically, testing for a single flag.
   def hasAbstractFlag    = hasFlag(ABSTRACT)
   def hasAccessorFlag    = hasFlag(ACCESSOR)
-  def hasDefault         = hasAllFlags(DEFAULTPARAM | PARAM)
+  def hasDefault         = hasFlag(DEFAULTPARAM) && hasFlag(METHOD | PARAM) // Second condition disambiguates with TRAIT
+  def hasEnumFlag        = hasFlag(ENUM)
+  @deprecated("Use isLocalToThis instead", "2.11.0")
   def hasLocalFlag       = hasFlag(LOCAL)
+  def isLocalToThis      = hasFlag(LOCAL)
   def hasModuleFlag      = hasFlag(MODULE)
   def hasPackageFlag     = hasFlag(PACKAGE)
   def hasStableFlag      = hasFlag(STABLE)
@@ -105,6 +108,7 @@ trait HasFlags {
   def isOverride         = hasFlag(OVERRIDE)
   def isParamAccessor    = hasFlag(PARAMACCESSOR)
   def isPrivate          = hasFlag(PRIVATE)
+  @deprecated ("Use `hasPackageFlag` instead", "2.11.0")
   def isPackage          = hasFlag(PACKAGE)
   def isPrivateLocal     = hasAllFlags(PrivateLocal)
   def isProtected        = hasFlag(PROTECTED)
@@ -115,6 +119,9 @@ trait HasFlags {
   def isSuperAccessor    = hasFlag(SUPERACCESSOR)
   def isSynthetic        = hasFlag(SYNTHETIC)
   def isTrait            = hasFlag(TRAIT) && !hasFlag(PARAM)
+
+  def isDeferredOrDefault  = hasFlag(DEFERRED | DEFAULTMETHOD)
+  def isDeferredNotDefault = isDeferred && !hasFlag(DEFAULTMETHOD)
 
   def flagBitsToString(bits: Long): String = {
     // Fast path for common case
@@ -161,14 +168,4 @@ trait HasFlags {
 
   // Guess this can't be deprecated seeing as it's in the reflect API.
   def isParameter = hasFlag(PARAM)
-
-  // Backward compat section
-  @deprecated( "Use isTrait", "2.10.0")
-  def hasTraitFlag = hasFlag(TRAIT)
-  @deprecated("Use hasDefault", "2.10.0")
-  def hasDefaultFlag = hasFlag(DEFAULTPARAM)
-  @deprecated("Use flagString", "2.10.0")
-  def defaultFlagString = flagString
-  @deprecated("Use flagString(mask)", "2.10.0")
-  def hasFlagsToString(mask: Long): String = flagString(mask)
 }

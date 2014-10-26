@@ -29,11 +29,11 @@ import scala.reflect.ClassTag
 
 /** The trait that represents futures.
  *
- *  Asynchronous computations that yield futures are created with the `future` call:
+ *  Asynchronous computations that yield futures are created with the `Future` call:
  *
  *  {{{
  *  val s = "Hello"
- *  val f: Future[String] = future {
+ *  val f: Future[String] = Future {
  *    s + " future!"
  *  }
  *  f onSuccess {
@@ -67,8 +67,8 @@ import scala.reflect.ClassTag
  *  Example:
  *
  *  {{{
- *  val f = future { 5 }
- *  val g = future { 3 }
+ *  val f = Future { 5 }
+ *  val g = Future { 3 }
  *  val h = for {
  *    x: Int <- f // returns Future(5)
  *    y: Int <- g // returns Future(3)
@@ -96,16 +96,13 @@ trait Future[+T] extends Awaitable[T] {
   // of the Future trait. Note that this will
   // (modulo bugs) _never_ execute a callback
   // other than those below in this same file.
-  // As a nice side benefit, having this implicit
-  // here forces an ambiguity in those methods
-  // that also have an executor parameter, which
-  // keeps us from accidentally forgetting to use
-  // the executor parameter.
+  //
+  // See the documentation on `InternalCallbackExecutor` for more details.
   private def internalExecutor = Future.InternalCallbackExecutor
 
   /* Callbacks */
 
-  /** When this future is completed successfully (i.e. with a value),
+  /** When this future is completed successfully (i.e., with a value),
    *  apply the provided partial function to the value if the partial function
    *  is defined at that value.
    *
@@ -121,7 +118,7 @@ trait Future[+T] extends Awaitable[T] {
     case _ =>
   }
 
-  /** When this future is completed with a failure (i.e. with a throwable),
+  /** When this future is completed with a failure (i.e., with a throwable),
    *  apply the provided callback to the throwable.
    *
    *  $caughtThrowables
@@ -254,7 +251,7 @@ trait Future[+T] extends Awaitable[T] {
       case Success(v) => try f(v) match {
         // If possible, link DefaultPromises to avoid space leaks
         case dp: DefaultPromise[_] => dp.asInstanceOf[DefaultPromise[S]].linkRootOf(p)
-        case fut => fut onComplete p.complete 
+        case fut => fut.onComplete(p.complete)(internalExecutor)
       } catch { case NonFatal(t) => p failure t }
     }
     p.future
@@ -269,7 +266,7 @@ trait Future[+T] extends Awaitable[T] {
    *
    *  Example:
    *  {{{
-   *  val f = future { 5 }
+   *  val f = Future { 5 }
    *  val g = f filter { _ % 2 == 1 }
    *  val h = f filter { _ % 2 == 0 }
    *  Await.result(g, Duration.Zero) // evaluates to 5
@@ -294,7 +291,7 @@ trait Future[+T] extends Awaitable[T] {
    *
    *  Example:
    *  {{{
-   *  val f = future { -5 }
+   *  val f = Future { -5 }
    *  val g = f collect {
    *    case x if x < 0 => -x
    *  }
@@ -317,9 +314,9 @@ trait Future[+T] extends Awaitable[T] {
    *  Example:
    *
    *  {{{
-   *  future (6 / 0) recover { case e: ArithmeticException => 0 } // result: 0
-   *  future (6 / 0) recover { case e: NotFoundException   => 0 } // result: exception
-   *  future (6 / 2) recover { case e: ArithmeticException => 0 } // result: 3
+   *  Future (6 / 0) recover { case e: ArithmeticException => 0 } // result: 0
+   *  Future (6 / 0) recover { case e: NotFoundException   => 0 } // result: exception
+   *  Future (6 / 2) recover { case e: ArithmeticException => 0 } // result: 3
    *  }}}
    */
   def recover[U >: T](pf: PartialFunction[Throwable, U])(implicit executor: ExecutionContext): Future[U] = {
@@ -337,14 +334,14 @@ trait Future[+T] extends Awaitable[T] {
    *  Example:
    *
    *  {{{
-   *  val f = future { Int.MaxValue }
-   *  future (6 / 0) recoverWith { case e: ArithmeticException => f } // result: Int.MaxValue
+   *  val f = Future { Int.MaxValue }
+   *  Future (6 / 0) recoverWith { case e: ArithmeticException => f } // result: Int.MaxValue
    *  }}}
    */
   def recoverWith[U >: T](pf: PartialFunction[Throwable, Future[U]])(implicit executor: ExecutionContext): Future[U] = {
     val p = Promise[U]()
     onComplete {
-      case Failure(t) => try pf.applyOrElse(t, (_: Throwable) => this) onComplete p.complete catch { case NonFatal(t) => p failure t }
+      case Failure(t) => try pf.applyOrElse(t, (_: Throwable) => this).onComplete(p.complete)(internalExecutor) catch { case NonFatal(t) => p failure t }
       case other => p complete other
     }
     p.future
@@ -376,8 +373,8 @@ trait Future[+T] extends Awaitable[T] {
    *
    *  Example:
    *  {{{
-   *  val f = future { sys.error("failed") }
-   *  val g = future { 5 }
+   *  val f = Future { sys.error("failed") }
+   *  val g = Future { 5 }
    *  val h = f fallbackTo g
    *  Await.result(h, Duration.Zero) // evaluates to 5
    *  }}}
@@ -387,7 +384,10 @@ trait Future[+T] extends Awaitable[T] {
     val p = Promise[U]()
     onComplete {
       case s @ Success(_) => p complete s
-      case _ => p completeWith that
+      case f @ Failure(_) => that onComplete {
+        case s2 @ Success(_) => p complete s2
+        case _ => p complete f // Use the first failure as the failure
+      }
     }
     p.future
   }
@@ -419,7 +419,7 @@ trait Future[+T] extends Awaitable[T] {
    *  The following example prints out `5`:
    *
    *  {{{
-   *  val f = future { 5 }
+   *  val f = Future { 5 }
    *  f andThen {
    *    case r => sys.error("runtime exception")
    *  } andThen {
@@ -473,6 +473,13 @@ object Future {
    */
   def successful[T](result: T): Future[T] = Promise.successful(result).future
 
+  /** Creates an already completed Future with the specified result or exception.
+   *
+   *  @tparam T       the type of the value in the promise
+   *  @return         the newly created `Future` object
+   */
+  def fromTry[T](result: Try[T]): Future[T] = Promise.fromTry(result).future
+
   /** Starts an asynchronous computation and returns a `Future` object with the result of that computation.
   *
   *  The result becomes available once the asynchronous computation is completed.
@@ -484,12 +491,12 @@ object Future {
   */
   def apply[T](body: =>T)(implicit @deprecatedName('execctx) executor: ExecutionContext): Future[T] = impl.Future(body)
 
-  /** Simple version of `Futures.traverse`. Transforms a `TraversableOnce[Future[A]]` into a `Future[TraversableOnce[A]]`.
+  /** Simple version of `Future.traverse`. Transforms a `TraversableOnce[Future[A]]` into a `Future[TraversableOnce[A]]`.
    *  Useful for reducing many `Future`s into a single `Future`.
    */
-  def sequence[A, M[_] <: TraversableOnce[_]](in: M[Future[A]])(implicit cbf: CanBuildFrom[M[Future[A]], A, M[A]], executor: ExecutionContext): Future[M[A]] = {
+  def sequence[A, M[X] <: TraversableOnce[X]](in: M[Future[A]])(implicit cbf: CanBuildFrom[M[Future[A]], A, M[A]], executor: ExecutionContext): Future[M[A]] = {
     in.foldLeft(successful(cbf(in))) {
-      (fr, fa) => for (r <- fr; a <- fa.asInstanceOf[Future[A]]) yield (r += a)
+      (fr, fa) => for (r <- fr; a <- fa) yield (r += a)
     } map (_.result())
   }
 
@@ -562,9 +569,9 @@ object Future {
    *    val myFutureList = Future.traverse(myList)(x => Future(myFunc(x)))
    *  }}}
    */
-  def traverse[A, B, M[_] <: TraversableOnce[_]](in: M[A])(fn: A => Future[B])(implicit cbf: CanBuildFrom[M[A], B, M[B]], executor: ExecutionContext): Future[M[B]] =
+  def traverse[A, B, M[X] <: TraversableOnce[X]](in: M[A])(fn: A => Future[B])(implicit cbf: CanBuildFrom[M[A], B, M[B]], executor: ExecutionContext): Future[M[B]] =
     in.foldLeft(successful(cbf(in))) { (fr, a) =>
-      val fb = fn(a.asInstanceOf[A])
+      val fb = fn(a)
       for (r <- fr; b <- fb) yield (r += b)
     }.map(_.result())
 

@@ -93,7 +93,7 @@ trait TypeKinds { self: ICodes =>
     /**
      * this is directly assignable to other if no coercion or
      * casting is needed to convert this to other. It's a distinct
-     * relationship from <:< because on the JVM, BOOL, BYTE, CHAR, 
+     * relationship from <:< because on the JVM, BOOL, BYTE, CHAR,
      * SHORT need no coercion to INT even though JVM arrays
      * are covariant, ARRAY[SHORT] is not a subtype of ARRAY[INT]
      */
@@ -101,7 +101,7 @@ trait TypeKinds { self: ICodes =>
       case INT  => this.isIntSizedType
       case _    => this <:< other
     }
-    
+
     /** Is this type a category 2 type in JVM terms? (ie, is it LONG or DOUBLE?) */
     def isWideType: Boolean = false
 
@@ -393,7 +393,7 @@ trait TypeKinds { self: ICodes =>
     // if the first two cases exist because they do or as a defensive measure, but
     // at the time I added it, RefinedTypes were indeed reaching here.
     case ExistentialType(_, t)           => toTypeKind(t)
-    case AnnotatedType(_, t, _)          => toTypeKind(t)
+    case AnnotatedType(_, t)             => toTypeKind(t)
     case RefinedType(parents, _)         => parents map toTypeKind reduceLeft lub
     // For sure WildcardTypes shouldn't reach here either, but when
     // debugging such situations this may come in handy.

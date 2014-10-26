@@ -17,7 +17,6 @@ class JLineCompletion(val intp: IMain) extends Completion with CompletionOutput 
   import global._
   import definitions._
   import rootMirror.{ RootClass, getModuleIfDefined }
-  type ExecResult = Any
   import intp.{ debugging }
 
   // verbosity goes up with consecutive tabs
@@ -49,7 +48,7 @@ class JLineCompletion(val intp: IMain) extends Completion with CompletionOutput 
     // compiler to crash for reasons not yet known.
     def members     = exitingTyper((effectiveTp.nonPrivateMembers.toList ++ anyMembers) filter (_.isPublic))
     def methods     = members.toList filter (_.isMethod)
-    def packages    = members.toList filter (_.isPackage)
+    def packages    = members.toList filter (_.hasPackageFlag)
     def aliases     = members.toList filter (_.isAliasType)
 
     def memberNames   = members map tos
@@ -295,7 +294,7 @@ class JLineCompletion(val intp: IMain) extends Completion with CompletionOutput 
     // This is jline's entry point for completion.
     override def complete(buf: String, cursor: Int): Candidates = {
       verbosity = if (isConsecutiveTabs(buf, cursor)) verbosity + 1 else 0
-      repldbg("\ncomplete(%s, %d) last = (%s, %d), verbosity: %s".format(buf, cursor, lastBuf, lastCursor, verbosity))
+      repldbg(f"%ncomplete($buf, $cursor%d) last = ($lastBuf, $lastCursor%d), verbosity: $verbosity")
 
       // we don't try lower priority completions unless higher ones return no results.
       def tryCompletion(p: Parsed, completionFunction: Parsed => List[String]): Option[Candidates] = {
@@ -308,8 +307,7 @@ class JLineCompletion(val intp: IMain) extends Completion with CompletionOutput 
             val advance = longestCommonPrefix(winners)
             lastCursor = p.position + advance.length
             lastBuf = (buf take p.position) + advance
-            repldbg("tryCompletion(%s, _) lastBuf = %s, lastCursor = %s, p.position = %s".format(
-              p, lastBuf, lastCursor, p.position))
+            repldbg(s"tryCompletion($p, _) lastBuf = $lastBuf, lastCursor = $lastCursor, p.position = ${p.position}")
             p.position
           }
 

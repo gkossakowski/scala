@@ -33,10 +33,10 @@ trait Variances {
     /** Is every symbol in the owner chain between `site` and the owner of `sym`
      *  either a term symbol or private[this]? If not, add `sym` to the set of
      *  esacped locals.
-     *  @pre  sym.hasLocalFlag
+     *  @pre  sym.isLocalToThis
      */
     @tailrec final def checkForEscape(sym: Symbol, site: Symbol) {
-      if (site == sym.owner || site == sym.owner.moduleClass || site.isPackage) () // done
+      if (site == sym.owner || site == sym.owner.moduleClass || site.hasPackageFlag) () // done
       else if (site.isTerm || site.isPrivateLocal) checkForEscape(sym, site.owner) // ok - recurse to owner
       else escapedLocals += sym
     }
@@ -53,8 +53,8 @@ trait Variances {
     // return Bivariant if `sym` is local to a term
     // or is private[this] or protected[this]
     def isLocalOnly(sym: Symbol) = !sym.owner.isClass || (
-         sym.isTerm
-      && (sym.hasLocalFlag || sym.isSuperAccessor) // super accessors are implicitly local #4345
+         sym.isTerm // ?? shouldn't this be sym.owner.isTerm according to the comments above?
+      && (sym.isLocalToThis || sym.isSuperAccessor) // super accessors are implicitly local #4345
       && !escapedLocals(sym)
     )
 
@@ -65,16 +65,24 @@ trait Variances {
        *  The search proceeds from `base` to the owner of `tvar`.
        *  Initially the state is covariant, but it might change along the search.
        *
-       *  An alias which does not override anything is treated as Bivariant;
+       *  A local alias type is treated as Bivariant;
        *  this is OK because we always expand aliases for variance checking.
-       *  However if it does override a type in a base class, we must assume Invariant
-       *  because there may be references to the type parameter that are not checked.
+       *  However, for an alias which might be externally visible, we must assume Invariant,
+       *  because there may be references to the type parameter that are not checked,
+       *  leading to unsoundness (see SI-6566).
        */
       def relativeVariance(tvar: Symbol): Variance = {
         def nextVariance(sym: Symbol, v: Variance): Variance = (
           if (shouldFlip(sym, tvar)) v.flip
           else if (isLocalOnly(sym)) Bivariant
-          else if (sym.isAliasType) Invariant
+          else if (sym.isAliasType) (
+            // Unsound pre-2.11 behavior preserved under -Xsource:2.10
+            if (settings.isScala211 || sym.isOverridingSymbol) Invariant
+            else {
+              currentRun.reporting.deprecationWarning(sym.pos, s"Construct depends on unsound variance analysis and will not compile in scala 2.11 and beyond")
+              Bivariant
+            }
+          )
           else v
         )
         def loop(sym: Symbol, v: Variance): Variance = (
@@ -84,7 +92,7 @@ trait Variances {
         loop(base, Covariant)
       }
       def isUncheckedVariance(tp: Type) = tp match {
-        case AnnotatedType(annots, _, _) => annots exists (_ matches definitions.uncheckedVarianceClass)
+        case AnnotatedType(annots, _)    => annots exists (_ matches definitions.uncheckedVarianceClass)
         case _                           => false
       }
 
@@ -142,7 +150,8 @@ trait Variances {
       // No variance check for object-private/protected methods/values.
       // Or constructors, or case class factory or extractor.
       def skip = (
-           sym.hasLocalFlag
+           sym == NoSymbol
+        || sym.isLocalToThis
         || sym.owner.isConstructor
         || sym.owner.isCaseApplyOrUnapply
       )
@@ -161,6 +170,16 @@ trait Variances {
           traverseTreess(vparamss)
         case Template(_, _, _) =>
           super.traverse(tree)
+        case CompoundTypeTree(templ) =>
+          super.traverse(tree)
+
+        // SI-7872 These two cases make sure we don't miss variance exploits
+        // in originals, e.g. in `foo[({type l[+a] = List[a]})#l]`
+        case tt @ TypeTree() if tt.original != null =>
+          super.traverse(tt.original)
+        case tt : TypTree =>
+          super.traverse(tt)
+
         case _ =>
       }
     }
@@ -191,7 +210,7 @@ trait Variances {
       case MethodType(params, restpe)                   => inSyms(params).flip         & inType(restpe)
       case PolyType(tparams, restpe)                    => inSyms(tparams).flip        & inType(restpe)
       case ExistentialType(tparams, restpe)             => inSyms(tparams)             & inType(restpe)
-      case AnnotatedType(annots, tp, _)                 => inTypes(annots map (_.atp)) & inType(tp)
+      case AnnotatedType(annots, tp)                    => inTypes(annots map (_.atp)) & inType(tp)
     }
 
     inType(tp)

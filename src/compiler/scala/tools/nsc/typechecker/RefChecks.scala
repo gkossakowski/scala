@@ -121,28 +121,33 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
     var checkedCombinations = Set[List[Type]]()
 
     // only one overloaded alternative is allowed to define default arguments
-    private def checkOverloadedRestrictions(clazz: Symbol): Unit = {
+    private def checkOverloadedRestrictions(clazz: Symbol, defaultClass: Symbol): Unit = {
       // Using the default getters (such as methodName$default$1) as a cheap way of
       // finding methods with default parameters. This way, we can limit the members to
       // those with the DEFAULTPARAM flag, and infer the methods. Looking for the methods
       // directly requires inspecting the parameter list of every one. That modification
       // shaved 95% off the time spent in this method.
-      val defaultGetters     = clazz.info.findMembers(0L, DEFAULTPARAM)
+      val defaultGetters     = defaultClass.info.findMembers(excludedFlags = PARAM, requiredFlags = DEFAULTPARAM)
       val defaultMethodNames = defaultGetters map (sym => nme.defaultGetterToMethod(sym.name))
 
       defaultMethodNames.toList.distinct foreach { name =>
-        val methods      = clazz.info.findMember(name, 0L, METHOD, stableOnly = false).alternatives
+        val methods      = clazz.info.findMember(name, 0L, requiredFlags = METHOD, stableOnly = false).alternatives
         def hasDefaultParam(tpe: Type): Boolean = tpe match {
           case MethodType(params, restpe) => (params exists (_.hasDefault)) || hasDefaultParam(restpe)
-          case _ => false
+          case _                          => false
         }
-        val haveDefaults = methods filter (sym => hasDefaultParam(sym.info) && !nme.isProtectedAccessorName(sym.name))
+        val haveDefaults = methods filter (
+          if (settings.isScala211)
+             (sym => mexists(sym.info.paramss)(_.hasDefault) && !nme.isProtectedAccessorName(sym.name))
+          else
+            (sym => hasDefaultParam(sym.info) && !nme.isProtectedAccessorName(sym.name))
+        )
 
         if (haveDefaults.lengthCompare(1) > 0) {
           val owners = haveDefaults map (_.owner)
            // constructors of different classes are allowed to have defaults
           if (haveDefaults.exists(x => !x.isConstructor) || owners.distinct.size < haveDefaults.size) {
-            unit.error(clazz.pos,
+            reporter.error(clazz.pos,
               "in "+ clazz +
               ", multiple overloaded alternatives of "+ haveDefaults.head +
               " define default arguments" + (
@@ -157,17 +162,17 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
       // Check for doomed attempt to overload applyDynamic
       if (clazz isSubClass DynamicClass) {
         for ((_, m1 :: m2 :: _) <- (clazz.info member nme.applyDynamic).alternatives groupBy (_.typeParams.length)) {
-          unit.error(m1.pos, "implementation restriction: applyDynamic cannot be overloaded except by methods with different numbers of type parameters, e.g. applyDynamic[T1](method: String)(arg: T1) and applyDynamic[T1, T2](method: String)(arg1: T1, arg2: T2)")
+          reporter.error(m1.pos, "implementation restriction: applyDynamic cannot be overloaded except by methods with different numbers of type parameters, e.g. applyDynamic[T1](method: String)(arg: T1) and applyDynamic[T1, T2](method: String)(arg1: T1, arg2: T2)")
         }
       }
 
       // This has become noisy with implicit classes.
-      if (settings.lint && settings.developer) {
+      if (settings.warnPolyImplicitOverload && settings.developer) {
         clazz.info.decls filter (x => x.isImplicit && x.typeParams.nonEmpty) foreach { sym =>
           // implicit classes leave both a module symbol and a method symbol as residue
           val alts = clazz.info.decl(sym.name).alternatives filterNot (_.isModule)
           if (alts.size > 1)
-            alts foreach (x => unit.warning(x.pos, "parameterized overloaded implicit methods are not visible as view bounds"))
+            alts foreach (x => reporter.warning(x.pos, "parameterized overloaded implicit methods are not visible as view bounds"))
         }
       }
     }
@@ -276,10 +281,10 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
         mixinOverrideErrors.toList match {
           case List() =>
           case List(MixinOverrideError(_, msg)) =>
-            unit.error(clazz.pos, msg)
+            reporter.error(clazz.pos, msg)
           case MixinOverrideError(member, msg) :: others =>
             val others1 = others.map(_.member.name.decode).filter(member.name.decode != _).distinct
-            unit.error(
+            reporter.error(
               clazz.pos,
               msg+(if (others1.isEmpty) ""
                    else ";\n other members with override errors are: "+(others1 mkString ", ")))
@@ -305,18 +310,23 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
       /* Check that all conditions for overriding `other` by `member`
        * of class `clazz` are met.
        */
-      def checkOverride(member: Symbol, other: Symbol) {
+      def checkOverride(pair: SymbolPair) {
+        import pair._
+        val member   = low
+        val other    = high
+        def memberTp = lowType
+        def otherTp  = highType
+
         debuglog("Checking validity of %s overriding %s".format(member.fullLocationString, other.fullLocationString))
 
-        def memberTp = self.memberType(member)
-        def otherTp  = self.memberType(other)
-        def noErrorType = other.tpe != ErrorType && member.tpe != ErrorType
+        def noErrorType = !pair.isErroneous
         def isRootOrNone(sym: Symbol) = sym != null && sym.isRoot || sym == NoSymbol
-        def isNeitherInClass = (member.owner != clazz) && (other.owner != clazz)
+        def isNeitherInClass = member.owner != pair.base && other.owner != pair.base
+
         def objectOverrideErrorMsg = (
-          "overriding " + other.fullLocationString + " with " + member.fullLocationString + ":\n" +
+          "overriding " + high.fullLocationString + " with " + low.fullLocationString + ":\n" +
           "an overriding object must conform to the overridden object's class bound" +
-          analyzer.foundReqMsg(classBoundAsSeen(member.tpe), classBoundAsSeen(other.tpe))
+          analyzer.foundReqMsg(pair.lowClassBound, pair.highClassBound)
         )
 
         def overrideErrorMsg(msg: String): String = {
@@ -337,7 +347,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
           )
         }
         def emitOverrideError(fullmsg: String) {
-          if (member.owner == clazz) unit.error(member.pos, fullmsg)
+          if (member.owner == clazz) reporter.error(member.pos, fullmsg)
           else mixinOverrideErrors += new MixinOverrideError(member, fullmsg)
         }
 
@@ -411,7 +421,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
             overrideError("cannot be used here - classes can only override abstract types")
           } else if (other.isEffectivelyFinal) { // (1.2)
             overrideError("cannot override final member")
-          } else if (!other.isDeferred && !other.hasFlag(DEFAULTMETHOD) && !member.isAnyOverride && !member.isSynthetic) { // (*)
+          } else if (!other.isDeferredOrDefault && !other.hasFlag(DEFAULTMETHOD) && !member.isAnyOverride && !member.isSynthetic) { // (*)
             // (*) Synthetic exclusion for (at least) default getters, fixes SI-5178. We cannot assign the OVERRIDE flag to
             // the default getter: one default getter might sometimes override, sometimes not. Example in comment on ticket.
               if (isNeitherInClass && !(other.owner isSubClass member.owner))
@@ -454,99 +464,97 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
             checkOverrideDeprecated()
             if (settings.warnNullaryOverride) {
               if (other.paramss.isEmpty && !member.paramss.isEmpty) {
-                unit.warning(member.pos, "non-nullary method overrides nullary method")
+                reporter.warning(member.pos, "non-nullary method overrides nullary method")
               }
             }
           }
         }
 
-        def checkOverrideTypes() {
-          if (other.isAliasType) {
-            //if (!member.typeParams.isEmpty) (1.5)  @MAT
-            //  overrideError("may not be parameterized");
-            //if (!other.typeParams.isEmpty)  (1.5)   @MAT
-            //  overrideError("may not override parameterized type");
-            // @M: substSym
-
-            if( !(sameLength(member.typeParams, other.typeParams) && (memberTp.substSym(member.typeParams, other.typeParams) =:= otherTp)) ) // (1.6)
-              overrideTypeError()
+        //if (!member.typeParams.isEmpty) (1.5)  @MAT
+        //  overrideError("may not be parameterized");
+        //if (!other.typeParams.isEmpty)  (1.5)   @MAT
+        //  overrideError("may not override parameterized type");
+        // @M: substSym
+        def checkOverrideAlias() {
+          // Important: first check the pair has the same kind, since the substitution
+          // carries high's type parameter's bounds over to low, so that
+          // type equality doesn't consider potentially different bounds on low/high's type params.
+          // In b781e25afe this went from using memberInfo to memberType (now lowType/highType), tested by neg/override.scala.
+          // TODO: was that the right fix? it seems type alias's RHS should be checked by looking at the symbol's info
+          if (pair.sameKind && lowType.substSym(low.typeParams, high.typeParams) =:= highType) ()
+          else overrideTypeError() // (1.6)
+        }
+        //if (!member.typeParams.isEmpty) // (1.7)  @MAT
+        //  overrideError("may not be parameterized");
+        def checkOverrideAbstract() {
+          if (!(highInfo.bounds containsType lowType)) { // (1.7.1)
+            overrideTypeError(); // todo: do an explaintypes with bounds here
+            explainTypes(_.bounds containsType _, highInfo, lowType)
           }
-          else if (other.isAbstractType) {
-            //if (!member.typeParams.isEmpty) // (1.7)  @MAT
-            //  overrideError("may not be parameterized");
-            val otherTp = self.memberInfo(other)
-
-            if (!(otherTp.bounds containsType memberTp)) { // (1.7.1)
-              overrideTypeError(); // todo: do an explaintypes with bounds here
-              explainTypes(_.bounds containsType _, otherTp, memberTp)
-            }
-
-            // check overriding (abstract type --> abstract type or abstract type --> concrete type member (a type alias))
-            // making an abstract type member concrete is like passing a type argument
-            val kindErrors = typer.infer.checkKindBounds(List(other), List(memberTp), self, member.owner) // (1.7.2)
-
-            if(!kindErrors.isEmpty)
-              unit.error(member.pos,
+          // check overriding (abstract type --> abstract type or abstract type --> concrete type member (a type alias))
+          // making an abstract type member concrete is like passing a type argument
+          typer.infer.checkKindBounds(high :: Nil, lowType :: Nil, rootType, low.owner) match { // (1.7.2)
+            case Nil        =>
+            case kindErrors =>
+              reporter.error(member.pos,
                 "The kind of "+member.keyString+" "+member.varianceString + member.nameString+
                 " does not conform to the expected kind of " + other.defString + other.locationString + "." +
                 kindErrors.toList.mkString("\n", ", ", ""))
-
-            // check a type alias's RHS corresponds to its declaration
-            // this overlaps somewhat with validateVariance
-            if(member.isAliasType) {
-              // println("checkKindBounds" + ((List(member), List(memberTp.dealiasWiden), self, member.owner)))
-              val kindErrors = typer.infer.checkKindBounds(List(member), List(memberTp.dealiasWiden), self, member.owner)
-
-              if(!kindErrors.isEmpty)
-                unit.error(member.pos,
-                  "The kind of the right-hand side "+memberTp.dealiasWiden+" of "+member.keyString+" "+
-                  member.varianceString + member.nameString+ " does not conform to its expected kind."+
+          }
+          // check a type alias's RHS corresponds to its declaration
+          // this overlaps somewhat with validateVariance
+          if (low.isAliasType) {
+            typer.infer.checkKindBounds(low :: Nil, lowType.normalize :: Nil, rootType, low.owner) match {
+              case Nil        =>
+              case kindErrors =>
+                reporter.error(member.pos,
+                  "The kind of the right-hand side "+lowType.normalize+" of "+low.keyString+" "+
+                  low.varianceString + low.nameString+ " does not conform to its expected kind."+
                   kindErrors.toList.mkString("\n", ", ", ""))
-            } else if (member.isAbstractType) {
-              if (memberTp.isVolatile && !otherTp.bounds.hi.isVolatile)
-                overrideError("is a volatile type; cannot override a type with non-volatile upper bound")
-            }
-          } else if (other.isTerm) {
-            other.cookJavaRawInfo() // #2454
-            val memberTp = self.memberType(member)
-            val otherTp = self.memberType(other)
-            if (!overridesTypeInPrefix(memberTp, otherTp, self)) { // 8
-              overrideTypeError()
-              explainTypes(memberTp, otherTp)
-            }
-
-            if (member.isStable && !otherTp.isVolatile) {
-              // (1.4), pt 2 -- member.isStable && memberTp.isVolatile started being possible after SI-6815
-              // (before SI-6815, !symbol.tpe.isVolatile was implied by symbol.isStable)
-              // TODO: allow overriding when @uncheckedStable?
-              if (memberTp.isVolatile)
-                overrideError("has a volatile type; cannot override a member with non-volatile type")
-              else memberTp.dealiasWiden.resultType match {
-                case rt: RefinedType if !(rt =:= otherTp) && !(checkedCombinations contains rt.parents) =>
-                  // might mask some inconsistencies -- check overrides
-                  checkedCombinations += rt.parents
-                  val tsym = rt.typeSymbol
-                  if (tsym.pos == NoPosition) tsym setPos member.pos
-                  checkAllOverrides(tsym, typesOnly = true)
-                case _ =>
-              }
             }
           }
+          else if (low.isAbstractType && lowType.isVolatile && !highInfo.bounds.hi.isVolatile)
+            overrideError("is a volatile type; cannot override a type with non-volatile upper bound")
+        }
+        def checkOverrideTerm() {
+          other.cookJavaRawInfo() // #2454
+          if (!overridesTypeInPrefix(lowType, highType, rootType)) { // 8
+            overrideTypeError()
+            explainTypes(lowType, highType)
+          }
+          if (low.isStable && !highType.isVolatile) {
+            if (lowType.isVolatile)
+              overrideError("has a volatile type; cannot override a member with non-volatile type")
+            else lowType.normalize.resultType match {
+              case rt: RefinedType if !(rt =:= highType) && !(checkedCombinations contains rt.parents) =>
+                // might mask some inconsistencies -- check overrides
+                checkedCombinations += rt.parents
+                val tsym = rt.typeSymbol
+                if (tsym.pos == NoPosition) tsym setPos member.pos
+                checkAllOverrides(tsym, typesOnly = true)
+              case _ =>
+            }
+          }
+        }
+        def checkOverrideTypes() {
+          if (high.isAliasType)         checkOverrideAlias()
+          else if (high.isAbstractType) checkOverrideAbstract()
+          else if (high.isTerm)         checkOverrideTerm()
         }
 
         def checkOverrideDeprecated() {
           if (other.hasDeprecatedOverridingAnnotation) {
             val suffix = other.deprecatedOverridingMessage map (": " + _) getOrElse ""
             val msg = s"overriding ${other.fullLocationString} is deprecated$suffix"
-            unit.deprecationWarning(member.pos, msg)
+            currentRun.reporting.deprecationWarning(member.pos, other, msg)
           }
         }
       }
 
       val opc = new overridingPairs.Cursor(clazz)
       while (opc.hasNext) {
-        //Console.println(opc.overriding/* + ":" + opc.overriding.tpe*/ + " in "+opc.overriding.fullName + " overrides " + opc.overridden/* + ":" + opc.overridden.tpe*/ + " in "+opc.overridden.fullName + "/"+ opc.overridden.hasFlag(DEFERRED));//debug
-        if (!opc.overridden.isClass) checkOverride(opc.overriding, opc.overridden)
+        if (!opc.high.isClass)
+          checkOverride(opc.currentPair)
 
         opc.next()
       }
@@ -585,10 +593,10 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
 
         def ignoreDeferred(member: Symbol) = (
           (member.isAbstractType && !member.isFBounded) || (
-            member.isJavaDefined &&
             // the test requires exitingErasure so shouldn't be
             // done if the compiler has no erasure phase available
-            (currentRun.erasurePhase == NoPhase || javaErasedOverridingSym(member) != NoSymbol)
+               member.isJavaDefined
+            && (currentRun.erasurePhase == NoPhase || javaErasedOverridingSym(member) != NoSymbol)
           )
         )
 
@@ -596,7 +604,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
         def checkNoAbstractMembers(): Unit = {
           // Avoid spurious duplicates: first gather any missing members.
           def memberList = clazz.info.nonPrivateMembersAdmitting(VBRIDGE)
-          val (missing, rest) = memberList partition (m => m.isDeferred && !ignoreDeferred(m))
+          val (missing, rest) = memberList partition (m => m.isDeferredNotDefault && !ignoreDeferred(m))
           // Group missing members by the name of the underlying symbol,
           // to consolidate getters and setters.
           val grouped = missing groupBy (sym => analyzer.underlyingSymbol(sym).name)
@@ -746,7 +754,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
           checkNoAbstractDecls(clazz)
 
         if (abstractErrors.nonEmpty)
-          unit.error(clazz.pos, abstractErrorMessage)
+          reporter.error(clazz.pos, abstractErrorMessage)
       }
       else if (clazz.isTrait && !(clazz isSubClass AnyValClass)) {
         // For non-AnyVal classes, prevent abstract methods in interfaces that override
@@ -757,7 +765,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
           // override a concrete method in Object. The jvm, however, does not.
           val overridden = decl.matchingSymbol(ObjectClass, ObjectTpe)
           if (overridden.isFinal)
-            unit.error(decl.pos, "trait cannot redefine final method from class AnyRef")
+            reporter.error(decl.pos, "trait cannot redefine final method from class AnyRef")
         }
       }
 
@@ -810,7 +818,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
           // for (bc <- clazz.info.baseClasses.tail) Console.println("" + bc + " has " + bc.info.decl(member.name) + ":" + bc.info.decl(member.name).tpe);//DEBUG
 
           val nonMatching: List[Symbol] = clazz.info.member(member.name).alternatives.filterNot(_.owner == clazz).filterNot(_.isFinal)
-          def issueError(suffix: String) = unit.error(member.pos, member.toString() + " overrides nothing" + suffix)
+          def issueError(suffix: String) = reporter.error(member.pos, member.toString() + " overrides nothing" + suffix)
           nonMatching match {
             case Nil =>
               issueError("")
@@ -859,11 +867,11 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
         val baseClass = clazz.info.baseTypeSeq(i).typeSymbol
         seenTypes(i) match {
           case Nil =>
-            println("??? base "+baseClass+" not found in basetypes of "+clazz)
+            devWarning(s"base $baseClass not found in basetypes of $clazz. This might indicate incorrect caching of TypeRef#parents.")
           case _ :: Nil =>
             ;// OK
           case tp1 :: tp2 :: _ =>
-            unit.error(clazz.pos, "illegal inheritance;\n " + clazz +
+            reporter.error(clazz.pos, "illegal inheritance;\n " + clazz +
                        " inherits different type instances of " + baseClass +
                        ":\n" + tp1 + " and " + tp2)
             explainTypes(tp1, tp2)
@@ -880,7 +888,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
         case _                                => "type "+tp
       }
       override def issueVarianceError(base: Symbol, sym: Symbol, required: Variance) {
-        currentRun.currentUnit.error(base.pos,
+        reporter.error(base.pos,
           s"${sym.variance} $sym occurs in $required position in ${tpString(base.info)} of $base")
       }
     }
@@ -909,7 +917,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
       var index = -1
       for (stat <- stats) {
         index = index + 1
-        def enterSym(sym: Symbol) = if (sym.isLocal) {
+        def enterSym(sym: Symbol) = if (sym.isLocalToBlock) {
           currentLevel.scope.enter(sym)
           symIndex(sym) = index
         }
@@ -926,7 +934,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
     }
 
     private def enterReference(pos: Position, sym: Symbol) {
-      if (sym.isLocal) {
+      if (sym.isLocalToBlock) {
         val e = currentLevel.scope.lookupEntry(sym.name)
         if ((e ne null) && sym == e.sym) {
           var l = currentLevel
@@ -946,9 +954,9 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
       def apply(tp: Type) = mapOver(tp).normalize
     }
 
-    def checkImplicitViewOptionApply(pos: Position, fn: Tree, args: List[Tree]): Unit = if (settings.lint) (fn, args) match {
-      case (tap@TypeApply(fun, targs), List(view: ApplyImplicitView)) if fun.symbol == Option_apply =>
-        unit.warning(pos, s"Suspicious application of an implicit view (${view.fun}) in the argument to Option.apply.") // SI-6567
+    def checkImplicitViewOptionApply(pos: Position, fn: Tree, args: List[Tree]): Unit = if (settings.warnOptionImplicit) (fn, args) match {
+      case (tap@TypeApply(fun, targs), List(view: ApplyImplicitView)) if fun.symbol == currentRun.runDefinitions.Option_apply =>
+        reporter.warning(pos, s"Suspicious application of an implicit view (${view.fun}) in the argument to Option.apply.") // SI-6567
       case _ =>
     }
 
@@ -956,162 +964,166 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
       case Object_eq | Object_ne | Object_== | Object_!= | Any_== | Any_!= => true
       case _                                                               => false
     }
+    /** Check the sensibility of using the given `equals` to compare `qual` and `other`. */
+    private def checkSensibleEquals(pos: Position, qual: Tree, name: Name, sym: Symbol, other: Tree) = {
+      def isReferenceOp = sym == Object_eq || sym == Object_ne
+      def isNew(tree: Tree) = tree match {
+        case Function(_, _) | Apply(Select(New(_), nme.CONSTRUCTOR), _) => true
+        case _ => false
+      }
+      def underlyingClass(tp: Type): Symbol = {
+        val sym = tp.widen.typeSymbol
+        if (sym.isAbstractType) underlyingClass(sym.info.bounds.hi)
+        else sym
+      }
+      val actual   = underlyingClass(other.tpe)
+      val receiver = underlyingClass(qual.tpe)
+      def onTrees[T](f: List[Tree] => T) = f(List(qual, other))
+      def onSyms[T](f: List[Symbol] => T) = f(List(receiver, actual))
+
+      // @MAT normalize for consistency in error message, otherwise only part is normalized due to use of `typeSymbol`
+      def typesString = normalizeAll(qual.tpe.widen)+" and "+normalizeAll(other.tpe.widen)
+
+      /* Symbols which limit the warnings we can issue since they may be value types */
+      val isMaybeValue = Set[Symbol](AnyClass, AnyRefClass, AnyValClass, ObjectClass, ComparableClass, JavaSerializableClass)
+
+      // Whether def equals(other: Any) has known behavior: it is the default
+      // inherited from java.lang.Object, or it is a synthetically generated
+      // case equals.  TODO - more cases are warnable if the target is a synthetic
+      // equals.
+      def isUsingWarnableEquals = {
+        val m = receiver.info.member(nme.equals_)
+        ((m == Object_equals) || (m == Any_equals) || isMethodCaseEquals(m))
+      }
+      def isMethodCaseEquals(m: Symbol) = m.isSynthetic && m.owner.isCase
+      def isCaseEquals = isMethodCaseEquals(receiver.info.member(nme.equals_))
+      // Whether this == or != is one of those defined in Any/AnyRef or an overload from elsewhere.
+      def isUsingDefaultScalaOp = sym == Object_== || sym == Object_!= || sym == Any_== || sym == Any_!=
+      def haveSubclassRelationship = (actual isSubClass receiver) || (receiver isSubClass actual)
+
+      // Whether the operands+operator represent a warnable combo (assuming anyrefs)
+      // Looking for comparisons performed with ==/!= in combination with either an
+      // equals method inherited from Object or a case class synthetic equals (for
+      // which we know the logic.)
+      def isWarnable           = isReferenceOp || (isUsingDefaultScalaOp && isUsingWarnableEquals)
+      def isEitherNullable     = (NullTpe <:< receiver.info) || (NullTpe <:< actual.info)
+      def isEitherValueClass   = actual.isDerivedValueClass || receiver.isDerivedValueClass
+      def isBoolean(s: Symbol) = unboxedValueClass(s) == BooleanClass
+      def isUnit(s: Symbol)    = unboxedValueClass(s) == UnitClass
+      def isNumeric(s: Symbol) = isNumericValueClass(unboxedValueClass(s)) || isAnyNumber(s)
+      def isScalaNumber(s: Symbol) = s isSubClass ScalaNumberClass
+      def isJavaNumber(s: Symbol)  = s isSubClass JavaNumberClass
+      // includes java.lang.Number if appropriate [SI-5779]
+      def isAnyNumber(s: Symbol)     = isScalaNumber(s) || isJavaNumber(s)
+      def isMaybeAnyValue(s: Symbol) = isPrimitiveValueClass(unboxedValueClass(s)) || isMaybeValue(s)
+      // used to short-circuit unrelatedTypes check if both sides are special
+      def isSpecial(s: Symbol) = isMaybeAnyValue(s) || isAnyNumber(s)
+      val nullCount            = onSyms(_ filter (_ == NullClass) size)
+      def isNonsenseValueClassCompare = (
+           !haveSubclassRelationship
+        && isUsingDefaultScalaOp
+        && isEitherValueClass
+        && !isCaseEquals
+      )
+
+      // Have we already determined that the comparison is non-sensible? I mean, non-sensical?
+      var isNonSensible = false
+
+      def nonSensibleWarning(what: String, alwaysEqual: Boolean) = {
+        val msg = alwaysEqual == (name == nme.EQ || name == nme.eq)
+        reporter.warning(pos, s"comparing $what using `${name.decode}' will always yield $msg")
+        isNonSensible = true
+      }
+      def nonSensible(pre: String, alwaysEqual: Boolean) =
+        nonSensibleWarning(s"${pre}values of types $typesString", alwaysEqual)
+      def nonSensiblyEq() = nonSensible("", alwaysEqual = true)
+      def nonSensiblyNeq() = nonSensible("", alwaysEqual = false)
+      def nonSensiblyNew() = nonSensibleWarning("a fresh object", alwaysEqual = false)
+
+      def unrelatedMsg = name match {
+        case nme.EQ | nme.eq => "never compare equal"
+        case _               => "always compare unequal"
+      }
+      def unrelatedTypes() = if (!isNonSensible) {
+        val weaselWord = if (isEitherValueClass) "" else " most likely"
+        reporter.warning(pos, s"$typesString are unrelated: they will$weaselWord $unrelatedMsg")
+      }
+
+      if (nullCount == 2) // null == null
+        nonSensiblyEq()
+      else if (nullCount == 1) {
+        if (onSyms(_ exists isPrimitiveValueClass)) // null == 5
+          nonSensiblyNeq()
+        else if (onTrees( _ exists isNew)) // null == new AnyRef
+          nonSensiblyNew()
+      }
+      else if (isBoolean(receiver)) {
+        if (!isBoolean(actual) && !isMaybeValue(actual))    // true == 5
+          nonSensiblyNeq()
+      }
+      else if (isUnit(receiver)) {
+        if (isUnit(actual)) // () == ()
+          nonSensiblyEq()
+        else if (!isUnit(actual) && !isMaybeValue(actual))  // () == "abc"
+          nonSensiblyNeq()
+      }
+      else if (isNumeric(receiver)) {
+        if (!isNumeric(actual))
+          if (isUnit(actual) || isBoolean(actual) || !isMaybeValue(actual))   // 5 == "abc"
+            nonSensiblyNeq()
+      }
+      else if (isWarnable && !isCaseEquals) {
+        if (isNew(qual)) // new X == y
+          nonSensiblyNew()
+        else if (isNew(other) && (receiver.isEffectivelyFinal || isReferenceOp))   // object X ; X == new Y
+          nonSensiblyNew()
+        else if (receiver.isEffectivelyFinal && !(receiver isSubClass actual) && !actual.isRefinementClass) {  // object X, Y; X == Y
+          if (isEitherNullable)
+            nonSensible("non-null ", false)
+          else
+            nonSensiblyNeq()
+        }
+      }
+
+      // warn if one but not the other is a derived value class
+      // this is especially important to enable transitioning from
+      // regular to value classes without silent failures.
+      if (isNonsenseValueClassCompare)
+        unrelatedTypes()
+      // possibleNumericCount is insufficient or this will warn on e.g. Boolean == j.l.Boolean
+      else if (isWarnable && nullCount == 0 && !(isSpecial(receiver) && isSpecial(actual))) {
+        // better to have lubbed and lost
+        def warnIfLubless(): Unit = {
+          val common = global.lub(List(actual.tpe, receiver.tpe))
+          if (ObjectTpe <:< common)
+            unrelatedTypes()
+        }
+        // warn if actual has a case parent that is not same as receiver's;
+        // if actual is not a case, then warn if no common supertype, as below
+        if (isCaseEquals) {
+          def thisCase = receiver.info.member(nme.equals_).owner
+          actual.info.baseClasses.find(_.isCase) match {
+            case Some(p) if p != thisCase => nonSensible("case class ", false)
+            case None =>
+              // stronger message on (Some(1) == None)
+              //if (receiver.isCase && receiver.isEffectivelyFinal && !(receiver isSubClass actual)) nonSensiblyNeq()
+              //else
+              // if a class, it must be super to thisCase (and receiver) since not <: thisCase
+              if (!actual.isTrait && !(receiver isSubClass actual)) nonSensiblyNeq()
+              else if (!haveSubclassRelationship) warnIfLubless()
+            case _ =>
+          }
+        }
+        // warn only if they have no common supertype below Object
+        else if (!haveSubclassRelationship) {
+          warnIfLubless()
+        }
+      }
+    }
+    /** Sensibility check examines flavors of equals. */
     def checkSensible(pos: Position, fn: Tree, args: List[Tree]) = fn match {
       case Select(qual, name @ (nme.EQ | nme.NE | nme.eq | nme.ne)) if args.length == 1 && isObjectOrAnyComparisonMethod(fn.symbol) =>
-        // Make sure the 'eq' or 'ne' method is the one in AnyRef.
-        def isReferenceOp = fn.symbol == Object_eq || fn.symbol == Object_ne
-        def isNew(tree: Tree) = tree match {
-          case Function(_, _)
-             | Apply(Select(New(_), nme.CONSTRUCTOR), _) => true
-          case _ => false
-        }
-        def underlyingClass(tp: Type): Symbol = {
-          val sym = tp.widen.typeSymbol
-          if (sym.isAbstractType) underlyingClass(sym.info.bounds.hi)
-          else sym
-        }
-        val actual   = underlyingClass(args.head.tpe)
-        val receiver = underlyingClass(qual.tpe)
-        def onTrees[T](f: List[Tree] => T) = f(List(qual, args.head))
-        def onSyms[T](f: List[Symbol] => T) = f(List(receiver, actual))
-
-        // @MAT normalize for consistency in error message, otherwise only part is normalized due to use of `typeSymbol`
-        def typesString = normalizeAll(qual.tpe.widen)+" and "+normalizeAll(args.head.tpe.widen)
-
-        /* Symbols which limit the warnings we can issue since they may be value types */
-        val isMaybeValue = Set[Symbol](AnyClass, AnyRefClass, AnyValClass, ObjectClass, ComparableClass, JavaSerializableClass)
-
-        // Whether def equals(other: Any) has known behavior: it is the default
-        // inherited from java.lang.Object, or it is a synthetically generated
-        // case equals.  TODO - more cases are warnable if the target is a synthetic
-        // equals.
-        def isUsingWarnableEquals = {
-          val m = receiver.info.member(nme.equals_)
-          ((m == Object_equals) || (m == Any_equals) || isMethodCaseEquals(m))
-        }
-        def isMethodCaseEquals(m: Symbol) = m.isSynthetic && m.owner.isCase
-        def isCaseEquals = isMethodCaseEquals(receiver.info.member(nme.equals_))
-        // Whether this == or != is one of those defined in Any/AnyRef or an overload from elsewhere.
-        def isUsingDefaultScalaOp = {
-          val s = fn.symbol
-          (s == Object_==) || (s == Object_!=) || (s == Any_==) || (s == Any_!=)
-        }
-        def haveSubclassRelationship = (actual isSubClass receiver) || (receiver isSubClass actual)
-
-        // Whether the operands+operator represent a warnable combo (assuming anyrefs)
-        // Looking for comparisons performed with ==/!= in combination with either an
-        // equals method inherited from Object or a case class synthetic equals (for
-        // which we know the logic.)
-        def isWarnable           = isReferenceOp || (isUsingDefaultScalaOp && isUsingWarnableEquals)
-        def isEitherNullable     = (NullTpe <:< receiver.info) || (NullTpe <:< actual.info)
-        def isEitherValueClass   = actual.isDerivedValueClass || receiver.isDerivedValueClass
-        def isBoolean(s: Symbol) = unboxedValueClass(s) == BooleanClass
-        def isUnit(s: Symbol)    = unboxedValueClass(s) == UnitClass
-        def isNumeric(s: Symbol) = isNumericValueClass(unboxedValueClass(s)) || isAnyNumber(s)
-        def isScalaNumber(s: Symbol) = s isSubClass ScalaNumberClass
-        def isJavaNumber(s: Symbol) = s isSubClass JavaNumberClass
-        // includes java.lang.Number if appropriate [SI-5779]
-        def isAnyNumber(s: Symbol) = isScalaNumber(s) || isJavaNumber(s)
-        def isMaybeAnyValue(s: Symbol) = isPrimitiveValueClass(unboxedValueClass(s)) || isMaybeValue(s)
-        // used to short-circuit unrelatedTypes check if both sides are special
-        def isSpecial(s: Symbol) = isMaybeAnyValue(s) || isAnyNumber(s)
-        val nullCount            = onSyms(_ filter (_ == NullClass) size)
-        def isNonsenseValueClassCompare = (
-             !haveSubclassRelationship
-          && isUsingDefaultScalaOp
-          && isEitherValueClass
-          && !isCaseEquals
-        )
-
-        def nonSensibleWarning(what: String, alwaysEqual: Boolean) = {
-          val msg = alwaysEqual == (name == nme.EQ || name == nme.eq)
-          unit.warning(pos, "comparing "+what+" using `"+name.decode+"' will always yield " + msg)
-        }
-        def nonSensible(pre: String, alwaysEqual: Boolean) =
-          nonSensibleWarning(pre+"values of types "+typesString, alwaysEqual)
-        def nonSensiblyEq() = nonSensible("", true)
-        def nonSensiblyNeq() = nonSensible("", false)
-        def nonSensiblyNew() = nonSensibleWarning("a fresh object", false)
-
-        def unrelatedMsg = name match {
-          case nme.EQ | nme.eq => "never compare equal"
-          case _               => "always compare unequal"
-        }
-        def unrelatedTypes() = {
-          val weaselWord = if (isEitherValueClass) "" else " most likely"
-          unit.warning(pos, s"$typesString are unrelated: they will$weaselWord $unrelatedMsg")
-        }
-
-        if (nullCount == 2) // null == null
-          nonSensiblyEq()
-        else if (nullCount == 1) {
-          if (onSyms(_ exists isPrimitiveValueClass)) // null == 5
-            nonSensiblyNeq()
-          else if (onTrees( _ exists isNew)) // null == new AnyRef
-            nonSensiblyNew()
-        }
-        else if (isBoolean(receiver)) {
-          if (!isBoolean(actual) && !isMaybeValue(actual))    // true == 5
-            nonSensiblyNeq()
-        }
-        else if (isUnit(receiver)) {
-          if (isUnit(actual)) // () == ()
-            nonSensiblyEq()
-          else if (!isUnit(actual) && !isMaybeValue(actual))  // () == "abc"
-            nonSensiblyNeq()
-        }
-        else if (isNumeric(receiver)) {
-          if (!isNumeric(actual))
-            if (isUnit(actual) || isBoolean(actual) || !isMaybeValue(actual))   // 5 == "abc"
-              nonSensiblyNeq()
-        }
-        else if (isWarnable && !isCaseEquals) {
-          if (isNew(qual)) // new X == y
-            nonSensiblyNew()
-          else if (isNew(args.head) && (receiver.isEffectivelyFinal || isReferenceOp))   // object X ; X == new Y
-            nonSensiblyNew()
-          else if (receiver.isEffectivelyFinal && !(receiver isSubClass actual) && !actual.isRefinementClass) {  // object X, Y; X == Y
-            if (isEitherNullable)
-              nonSensible("non-null ", false)
-            else
-              nonSensiblyNeq()
-          }
-        }
-
-        // warn if one but not the other is a derived value class
-        // this is especially important to enable transitioning from
-        // regular to value classes without silent failures.
-        if (isNonsenseValueClassCompare)
-          unrelatedTypes()
-        // possibleNumericCount is insufficient or this will warn on e.g. Boolean == j.l.Boolean
-        else if (isWarnable && nullCount == 0 && !(isSpecial(receiver) && isSpecial(actual))) {
-          // better to have lubbed and lost
-          def warnIfLubless(): Unit = {
-            val common = global.lub(List(actual.tpe, receiver.tpe))
-            if (ObjectTpe <:< common)
-              unrelatedTypes()
-          }
-          // warn if actual has a case parent that is not same as receiver's;
-          // if actual is not a case, then warn if no common supertype, as below
-          if (isCaseEquals) {
-            def thisCase = receiver.info.member(nme.equals_).owner
-            actual.info.baseClasses.find(_.isCase) match {
-              case Some(p) if p != thisCase => nonSensible("case class ", false)
-              case None =>
-                // stronger message on (Some(1) == None)
-                //if (receiver.isCase && receiver.isEffectivelyFinal && !(receiver isSubClass actual)) nonSensiblyNeq()
-                //else
-                // if a class, it must be super to thisCase (and receiver) since not <: thisCase
-                if (!actual.isTrait && !(receiver isSubClass actual)) nonSensiblyNeq()
-                else if (!haveSubclassRelationship) warnIfLubless()
-              case _ =>
-            }
-          }
-          // warn only if they have no common supertype below Object
-          else if (!haveSubclassRelationship) {
-            warnIfLubless()
-          }
-        }
+        checkSensibleEquals(pos, qual, name, fn.symbol, args.head)
       case _ =>
     }
 
@@ -1129,7 +1141,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
      && callsSelf
       )
       if (trivialInifiniteLoop)
-        unit.warning(valOrDef.rhs.pos, s"${valOrDef.symbol.fullLocationString} does nothing other than call itself recursively")
+        reporter.warning(valOrDef.rhs.pos, s"${valOrDef.symbol.fullLocationString} does nothing other than call itself recursively")
     }
 
 // Transformation ------------------------------------------------------------
@@ -1219,7 +1231,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
         finally if (currentLevel.maxindex > 0) {
           // An implementation restriction to avoid VerifyErrors and lazyvals mishaps; see SI-4717
           debuglog("refsym = " + currentLevel.refsym)
-          unit.error(currentLevel.refpos, "forward reference not allowed from self constructor invocation")
+          reporter.error(currentLevel.refpos, "forward reference not allowed from self constructor invocation")
         }
       case ModuleDef(_, _, _) => eliminateModuleDefs(tree)
       case ValDef(_, _, _, _) =>
@@ -1227,9 +1239,9 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
         if (tree1.symbol.isLazy) tree1 :: Nil
         else {
           val lazySym = tree.symbol.lazyAccessorOrSelf
-          if (lazySym.isLocal && index <= currentLevel.maxindex) {
+          if (lazySym.isLocalToBlock && index <= currentLevel.maxindex) {
             debuglog("refsym = " + currentLevel.refsym)
-            unit.error(currentLevel.refpos, "forward reference extends over definition of " + lazySym)
+            reporter.error(currentLevel.refpos, "forward reference extends over definition of " + lazySym)
           }
           tree1 :: Nil
         }
@@ -1243,7 +1255,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
       try typer.infer.checkBounds(tree0, pre, owner, tparams, argtps, "")
       catch {
         case ex: TypeError =>
-          unit.error(tree0.pos, ex.getMessage())
+          reporter.error(tree0.pos, ex.getMessage())
           if (settings.explaintypes) {
             val bounds = tparams map (tp => tp.info.instantiateTypeParams(tparams, argtps).bounds)
             (argtps, bounds).zipped map ((targ, bound) => explainTypes(bound.lo, targ))
@@ -1267,42 +1279,39 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
         false
     }
 
-    /** If symbol is deprecated, and the point of reference is not enclosed
-     *  in either a deprecated member or a scala bridge method, issue a warning.
-     */
-    private def checkDeprecated(sym: Symbol, pos: Position) {
-      if (sym.isDeprecated && !currentOwner.ownerChain.exists(x => x.isDeprecated || x.hasBridgeAnnotation)) {
-        unit.deprecationWarning(pos, "%s%s is deprecated%s".format(
-          sym, sym.locationString, sym.deprecationMessage map (": " + _) getOrElse "")
-        )
-      }
-    }
+    // Note: if a symbol has both @deprecated and @migration annotations and both
+    // warnings are enabled, only the first one checked here will be emitted.
+    // I assume that's a consequence of some code trying to avoid noise by suppressing
+    // warnings after the first, but I think it'd be better if we didn't have to
+    // arbitrarily choose one as more important than the other.
+    private def checkUndesiredProperties(sym: Symbol, pos: Position) {
+      // If symbol is deprecated, and the point of reference is not enclosed
+      // in either a deprecated member or a scala bridge method, issue a warning.
+      // TODO: x.hasBridgeAnnotation doesn't seem to be needed here...
+      if (sym.isDeprecated && !currentOwner.ownerChain.exists(x => x.isDeprecated || x.hasBridgeAnnotation))
+        currentRun.reporting.deprecationWarning(pos, sym)
 
-    /** Similar to deprecation: check if the symbol is marked with @migration
-     *  indicating it has changed semantics between versions.
-     */
-    private def checkMigration(sym: Symbol, pos: Position) = {
-      if (sym.hasMigrationAnnotation) {
+      // Similar to deprecation: check if the symbol is marked with @migration
+      // indicating it has changed semantics between versions.
+      if (sym.hasMigrationAnnotation && settings.Xmigration.value != NoScalaVersion) {
         val changed = try
           settings.Xmigration.value < ScalaVersion(sym.migrationVersion.get)
         catch {
           case e : NumberFormatException =>
-            unit.warning(pos, s"${sym.fullLocationString} has an unparsable version number: ${e.getMessage()}")
+            reporter.warning(pos, s"${sym.fullLocationString} has an unparsable version number: ${e.getMessage()}")
             // if we can't parse the format on the migration annotation just conservatively assume it changed
             true
         }
         if (changed)
-          unit.warning(pos, s"${sym.fullLocationString} has changed semantics in version ${sym.migrationVersion.get}:\n${sym.migrationMessage.get}")
+          reporter.warning(pos, s"${sym.fullLocationString} has changed semantics in version ${sym.migrationVersion.get}:\n${sym.migrationMessage.get}")
       }
-    }
-
-    private def checkCompileTimeOnly(sym: Symbol, pos: Position) = {
-      if (sym.isCompileTimeOnly) {
+      // See an explanation of compileTimeOnly in its scaladoc at scala.annotation.compileTimeOnly.
+      if (sym.isCompileTimeOnly && !currentOwner.ownerChain.exists(x => x.isCompileTimeOnly)) {
         def defaultMsg =
           sm"""Reference to ${sym.fullLocationString} should not have survived past type checking,
               |it should have been processed and eliminated during expansion of an enclosing macro."""
         // The getOrElse part should never happen, it's just here as a backstop.
-        unit.error(pos, sym.compileTimeOnlyMessage getOrElse defaultMsg)
+        reporter.error(pos, sym.compileTimeOnlyMessage getOrElse defaultMsg)
       }
     }
 
@@ -1312,8 +1321,8 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
         && !qual.tpe.isInstanceOf[ThisType]
         && sym.accessedOrSelf.isVal
       )
-      if (settings.lint.value && isLikelyUninitialized)
-        unit.warning(pos, s"Selecting ${sym} from ${sym.owner}, which extends scala.DelayedInit, is likely to yield an uninitialized value")
+      if (settings.warnDelayedInit && isLikelyUninitialized)
+        reporter.warning(pos, s"Selecting ${sym} from ${sym.owner}, which extends scala.DelayedInit, is likely to yield an uninitialized value")
     }
 
     private def lessAccessible(otherSym: Symbol, memberSym: Symbol): Boolean = (
@@ -1345,7 +1354,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
         if (memberSym.isDeferred) "may be unable to provide a concrete implementation of"
         else "may be unable to override"
 
-      unit.warning(memberSym.pos,
+      reporter.warning(memberSym.pos,
         "%s%s references %s %s.".format(
           memberSym.fullLocationString, comparison,
           accessFlagsToString(otherSym), otherSym
@@ -1379,8 +1388,8 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
     private def checkByNameRightAssociativeDef(tree: DefDef) {
       tree match {
         case DefDef(_, name, _, params :: _, _, _) =>
-          if (settings.lint && !treeInfo.isLeftAssoc(name.decodedName) && params.exists(p => isByName(p.symbol)))
-            unit.warning(tree.pos,
+          if (settings.warnByNameRightAssociative && !treeInfo.isLeftAssoc(name.decodedName) && params.exists(p => isByName(p.symbol)))
+            reporter.warning(tree.pos,
               "by-name parameters will be evaluated eagerly when called as a right-associative infix operator. For more details, see SI-1980.")
         case _ =>
       }
@@ -1397,10 +1406,10 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
           symbol.allOverriddenSymbols.filter(sym =>
             !sym.isDeprecated && !sym.isDeferred)
         if(!concrOvers.isEmpty)
-          unit.deprecationWarning(
+          currentRun.reporting.deprecationWarning(
             tree.pos,
-            symbol.toString + " overrides concrete, non-deprecated symbol(s):" +
-            concrOvers.map(_.name.decode).mkString("    ", ", ", ""))
+            symbol,
+            s"${symbol.toString} overrides concrete, non-deprecated symbol(s):    ${concrOvers.map(_.name.decode).mkString(", ")}")
       }
     }
     private def isRepeatedParamArg(tree: Tree) = currentApplication match {
@@ -1416,7 +1425,11 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
 
     private def checkTypeRef(tp: Type, tree: Tree, skipBounds: Boolean) = tp match {
       case TypeRef(pre, sym, args) =>
-        checkDeprecated(sym, tree.pos)
+        tree match {
+          case tt: TypeTree if tt.original == null => // SI-7783 don't warn about inferred types
+                                                      // FIXME: reconcile this check with one in resetAttrs
+          case _ => checkUndesiredProperties(sym, tree.pos)
+        }
         if(sym.isJavaDefined)
           sym.typeParams foreach (_.cookJavaRawInfo())
         if (!tp.isHigherKinded && !skipBounds)
@@ -1427,7 +1440,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
     private def checkTypeRefBounds(tp: Type, tree: Tree) = {
       var skipBounds = false
       tp match {
-        case AnnotatedType(ann :: Nil, underlying, selfSym) if ann.symbol == UncheckedBoundsClass =>
+        case AnnotatedType(ann :: Nil, underlying) if ann.symbol == UncheckedBoundsClass =>
           skipBounds = true
           underlying
         case TypeRef(pre, sym, args) =>
@@ -1447,7 +1460,6 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
 
     private def applyRefchecksToAnnotations(tree: Tree): Unit = {
       def applyChecks(annots: List[AnnotationInfo]) = {
-        annots foreach (annot => checkCompileTimeOnly(annot.atp.typeSymbol, annot.pos))
         checkAnnotations(annots map (_.atp), tree)
         transformTrees(annots flatMap (_.args))
       }
@@ -1458,7 +1470,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
           applyChecks(sym.annotations)
           // validate implicitNotFoundMessage
           analyzer.ImplicitNotFoundMsg.check(sym) foreach { warn =>
-            unit.warning(tree.pos, "Invalid implicitNotFound message for %s%s:\n%s".format(sym, sym.locationString, warn))
+            reporter.warning(tree.pos, f"Invalid implicitNotFound message for ${sym}%s${sym.locationString}%s:%n$warn")
           }
 
         case tpt@TypeTree() =>
@@ -1471,7 +1483,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
           }
 
           doTypeTraversal(tree) {
-            case tp @ AnnotatedType(annots, _, _)  =>
+            case tp @ AnnotatedType(annots, _)  =>
               applyChecks(annots)
             case tp =>
           }
@@ -1527,7 +1539,8 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
           transform(qual)
 
       case Apply(fn, args) =>
-        // sensicality should be subsumed by the unreachability/exhaustivity/irrefutability analyses in the pattern matcher
+        // sensicality should be subsumed by the unreachability/exhaustivity/irrefutability
+        // analyses in the pattern matcher
         if (!inPattern) {
           checkImplicitViewOptionApply(tree.pos, fn, args)
           checkSensible(tree.pos, fn, args)
@@ -1539,21 +1552,12 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
       val Select(qual, _) = tree
       val sym = tree.symbol
 
-      /* Note: if a symbol has both @deprecated and @migration annotations and both
-       * warnings are enabled, only the first one checked here will be emitted.
-       * I assume that's a consequence of some code trying to avoid noise by suppressing
-       * warnings after the first, but I think it'd be better if we didn't have to
-       * arbitrarily choose one as more important than the other.
-       */
-      checkDeprecated(sym, tree.pos)
-      if(settings.Xmigration.value != NoScalaVersion)
-        checkMigration(sym, tree.pos)
-      checkCompileTimeOnly(sym, tree.pos)
+      checkUndesiredProperties(sym, tree.pos)
       checkDelayedInitSelect(qual, sym, tree.pos)
 
       if (!sym.exists)
         devWarning("Select node has NoSymbol! " + tree + " / " + tree.tpe)
-      else if (sym.hasLocalFlag)
+      else if (sym.isLocalToThis)
         varianceValidator.checkForEscape(sym, currentClass)
 
       def checkSuper(mix: Name) =
@@ -1591,7 +1595,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
           || sym.allOverriddenSymbols.exists(over => !(over.tpe.resultType =:= sym.tpe.resultType))
         )
         if (!isOk)
-          unit.warning(sym.pos, s"side-effecting nullary methods are discouraged: suggest defining as `def ${sym.name.decode}()` instead")
+          reporter.warning(sym.pos, s"side-effecting nullary methods are discouraged: suggest defining as `def ${sym.name.decode}()` instead")
       case _ => ()
     }
 
@@ -1599,11 +1603,15 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
     private def checkAnyValSubclass(clazz: Symbol) = {
       if (clazz.isDerivedValueClass) {
         if (clazz.isTrait)
-          unit.error(clazz.pos, "Only classes (not traits) are allowed to extend AnyVal")
+          reporter.error(clazz.pos, "Only classes (not traits) are allowed to extend AnyVal")
         else if (clazz.hasAbstractFlag)
-          unit.error(clazz.pos, "`abstract' modifier cannot be used with value classes")
+          reporter.error(clazz.pos, "`abstract' modifier cannot be used with value classes")
       }
     }
+
+    private def checkUnexpandedMacro(t: Tree) =
+      if (!t.isDef && t.hasSymbolField && t.symbol.isTermMacro)
+        reporter.error(t.pos, "macro has not been expanded")
 
     override def transform(tree: Tree): Tree = {
       val savedLocalTyper = localTyper
@@ -1626,7 +1634,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
             if (settings.warnNullaryUnit)
               checkNullaryMethodReturnType(sym)
             if (settings.warnInaccessible) {
-              if (!sym.isConstructor && !sym.isEffectivelyFinal && !sym.isSynthetic)
+              if (!sym.isConstructor && !sym.isEffectivelyFinalOrNotOverridden && !sym.isSynthetic)
                 checkAccessibilityOfReferencedTypes(tree)
             }
             tree match {
@@ -1638,7 +1646,9 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
           case Template(parents, self, body) =>
             localTyper = localTyper.atOwner(tree, currentOwner)
             validateBaseTypes(currentOwner)
-            checkOverloadedRestrictions(currentOwner)
+            checkOverloadedRestrictions(currentOwner, currentOwner)
+            // SI-7870 default getters for constructors live in the companion module
+            checkOverloadedRestrictions(currentOwner, currentOwner.companionModule)
             val bridges = addVarargBridges(currentOwner)
             checkAllOverrides(currentOwner)
             checkAnyValSubclass(currentOwner)
@@ -1696,12 +1706,12 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
             tree
 
           case treeInfo.WildcardStarArg(_) if !isRepeatedParamArg(tree) =>
-            unit.error(tree.pos, "no `: _*' annotation allowed here\n"+
+            reporter.error(tree.pos, "no `: _*' annotation allowed here\n"+
               "(such annotations are only allowed in arguments to *-parameters)")
             tree
 
           case Ident(name) =>
-            checkCompileTimeOnly(tree.symbol, tree.pos)
+            checkUndesiredProperties(sym, tree.pos)
             transformCaseApply(tree,
               if (name != nme.WILDCARD && name != tpnme.WILDCARD_STAR) {
                 assert(sym != NoSymbol, "transformCaseApply: name = " + name.debugString + " tree = " + tree + " / " + tree.getClass) //debug
@@ -1756,15 +1766,20 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
         result match {
           case ClassDef(_, _, _, _)
              | TypeDef(_, _, _, _) =>
-            if (result.symbol.isLocal || result.symbol.isTopLevel)
+            if (result.symbol.isLocalToBlock || result.symbol.isTopLevel)
               varianceValidator.traverse(result)
+          case tt @ TypeTree() if tt.original != null =>
+            varianceValidator.traverse(tt.original) // See SI-7872
           case _ =>
         }
+
+        checkUnexpandedMacro(result)
+
         result
       } catch {
         case ex: TypeError =>
           if (settings.debug) ex.printStackTrace()
-          unit.error(tree.pos, ex.getMessage())
+          reporter.error(tree.pos, ex.getMessage())
           tree
       } finally {
         localTyper = savedLocalTyper

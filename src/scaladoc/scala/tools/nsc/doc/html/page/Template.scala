@@ -15,7 +15,7 @@ import base.comment._
 
 import model._
 import model.diagram._
-import scala.xml.{ NodeSeq, Text, UnprefixedAttribute }
+import scala.xml.{Elem, NodeSeq, Text, UnprefixedAttribute}
 import scala.language.postfixOps
 import scala.collection.mutable. { Set, HashSet }
 
@@ -110,7 +110,7 @@ class Template(universe: doc.Universe, generator: DiagramGenerator, tpl: DocTemp
               <img src={ relativeLinkTo(List(docEntityKindToBigImage(tpl), "lib")) }/>
         }}
         { owner }
-        <h1>{ displayName }</h1>
+        <h1>{ displayName }</h1> { permalink(tpl) }
       </div>
 
       { signature(tpl, isSelf = true) }
@@ -306,9 +306,6 @@ class Template(universe: doc.Universe, generator: DiagramGenerator, tpl: DocTemp
         <xml:group>
           <div id="comment" class="fullcommenttop">{ memberToCommentBodyHtml(mbr, inTpl, isSelf = true) }</div>
         </xml:group>
-      case dte: DocTemplateEntity if mbr.comment.isDefined =>
-        // comment of inner, documented class (only short comment, full comment is on the class' own page)
-        memberToInlineCommentHtml(mbr, isSelf)
       case _ =>
         // comment of non-class member or non-documentented inner class
         val commentBody = memberToCommentBodyHtml(mbr, inTpl, isSelf = false)
@@ -350,6 +347,14 @@ class Template(universe: doc.Universe, generator: DiagramGenerator, tpl: DocTemp
     val memberComment =
       if (mbr.comment.isEmpty) NodeSeq.Empty
       else <div class="comment cmt">{ commentToHtml(mbr.comment) }</div>
+
+    val authorComment =
+      if (! s.docAuthor || mbr.comment.isEmpty ||
+        mbr.comment.isDefined && mbr.comment.get.authors.isEmpty) NodeSeq.Empty
+      else <div class="comment cmt">
+        {if (mbr.comment.get.authors.size > 1) <h6>Authors:</h6> else <h6>Author:</h6>}
+        { mbr.comment.get.authors map bodyToHtml}
+      </div>
 
     val paramComments = {
       val prs: List[ParameterEntity] = mbr match {
@@ -681,7 +686,7 @@ class Template(universe: doc.Universe, generator: DiagramGenerator, tpl: DocTemp
     val typeHierarchy = createDiagram(_.inheritanceDiagram, "Type Hierarchy", "inheritance-diagram")
     val contentHierarchy = createDiagram(_.contentDiagram, "Content Hierarchy", "content-diagram")
 
-    memberComment ++ paramComments ++ attributesBlock ++ linearization ++ subclasses ++ typeHierarchy ++ contentHierarchy
+    memberComment ++ authorComment ++ paramComments ++ attributesBlock ++ linearization ++ subclasses ++ typeHierarchy ++ contentHierarchy
   }
 
   def boundsToHtml(hi: Option[TypeEntity], lo: Option[TypeEntity], hasLinks: Boolean): NodeSeq = {
@@ -715,6 +720,7 @@ class Template(universe: doc.Universe, generator: DiagramGenerator, tpl: DocTemp
 
   /** name, tparams, params, result */
   def signature(mbr: MemberEntity, isSelf: Boolean, isReduced: Boolean = false): NodeSeq = {
+
     def inside(hasLinks: Boolean, nameLink: String = ""): NodeSeq =
       <xml:group>
       <span class="modifier_kind">
@@ -825,11 +831,11 @@ class Template(universe: doc.Universe, generator: DiagramGenerator, tpl: DocTemp
       </xml:group>
     mbr match {
       case dte: DocTemplateEntity if !isSelf =>
-        <h4 class="signature">{ inside(hasLinks = true, nameLink = relativeLinkTo(dte)) }</h4>
+        <h4 class="signature">{ inside(hasLinks = true, nameLink = relativeLinkTo(dte)) }</h4> ++ permalink(dte, isSelf)
       case _ if isSelf =>
         <h4 id="signature" class="signature">{ inside(hasLinks = true) }</h4>
       case _ =>
-        <h4 class="signature">{ inside(hasLinks = true) }</h4>
+        <h4 class="signature">{ inside(hasLinks = true) }</h4> ++ permalink(mbr)
     }
 
   }

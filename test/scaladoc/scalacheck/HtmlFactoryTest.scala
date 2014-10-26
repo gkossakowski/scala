@@ -47,6 +47,7 @@ object Test extends Properties("HtmlFactory") {
     settings.scaladocQuietRun = true
     settings.nowarn.value = true
     settings.classpath.value = getClasspath
+    settings.docAuthor.value = true
 
     val reporter = new scala.tools.nsc.reporters.ConsoleReporter(settings)
     new DocFactory(reporter, settings)
@@ -147,7 +148,6 @@ object Test extends Properties("HtmlFactory") {
 
     result
   }
-
 
   def shortComments(root: scala.xml.Node) =
     XMLUtil.stripGroup(root).descendant.flatMap {
@@ -416,7 +416,7 @@ object Test extends Properties("HtmlFactory") {
      checkText("SI_5054_q1.scala")(
        (None,"""def test(): Int""", true)
        //Disabled because the full signature is now displayed
-       //(None,"""def test(implicit lost: Int): Int""", false)
+       //(None, """def test(implicit lost: Int): Int""", false)
      )
 
   property("SI-5054: Use cases should keep their flags - final should not be lost") =
@@ -569,6 +569,7 @@ object Test extends Properties("HtmlFactory") {
         The base comment. And another sentence...
         The base comment. And another sentence...
         Ending line
+        Author: StartAuthor a Scala developer EndAuthor
           T       StartT the type of the first argument EndT
           arg1    Start1 The T term comment End1
           arg2    Start2 The string comment End2
@@ -595,6 +596,7 @@ object Test extends Properties("HtmlFactory") {
         The base comment. And another sentence...
         The base comment. And another sentence...
         Ending line
+        Author: StartAuthor a Scala developer EndAuthor
           T       StartT the type of the first argument EndT
           arg1    Start1 The T term comment End1
           arg2    Start2 The string comment End2
@@ -657,7 +659,47 @@ object Test extends Properties("HtmlFactory") {
         s.contains("<pre>two lines, one useful</pre>") &&
         s.contains("<pre>line1\nline2\nline3\nline4</pre>") &&
         s.contains("<pre>a ragged example\na (condition)\n  the t h e n branch\nan alternative\n  the e l s e branch</pre>") &&
+        s.contains("<pre>Trait example {\n  Val x = a\n  Val y = b\n}</pre>") &&
         s.contains("<pre>l1\n\nl2\n\nl3\n\nl4\n\nl5</pre>")
+      }
+      case _ => false
+    }
+  }
+
+  property("SI-4014: Scaladoc omits @author: no authors") = {
+    val noAuthors = createTemplates("SI-4014_0.scala")("Foo.html")
+
+    noAuthors match {
+      case node: scala.xml.Node => {
+        val s = node.toString
+        ! s.contains("Author")
+      }
+      case _ => false
+    }
+  }
+
+  property("SI-4014: Scaladoc omits @author: one author") = {
+    val oneAuthor = createTemplates("SI-4014_1.scala")("Foo.html")
+
+    oneAuthor match {
+      case node: scala.xml.Node => {
+        val s = node.toString
+        s.contains("<h6>Author:</h6>") &&
+        s.contains("<p>The Only Author\n</p>")
+      }
+      case _ => false
+    }
+  }
+
+  property("SI-4014: Scaladoc omits @author: two authors") = {
+    val twoAuthors = createTemplates("SI-4014_2.scala")("Foo.html")
+
+    twoAuthors match {
+      case node: scala.xml.Node => {
+        val s = node.toString
+        s.contains("<h6>Authors:</h6>") &&
+        s.contains("<p>The First Author</p>") &&
+        s.contains("<p>The Second Author\n</p>")
       }
       case _ => false
     }
@@ -698,5 +740,78 @@ object Test extends Properties("HtmlFactory") {
       case node: scala.xml.Node => true
       case _ => false
     }
+
+    property("SI-8514: No inconsistencies") =
+      checkText("SI-8514.scala")(
+        (Some("a/package"),
+         """class A extends AnyRef
+            Some doc here
+            Some doc here
+            Annotations @DeveloperApi()
+         """, true),
+        (Some("a/package"),
+         """class B extends AnyRef
+            Annotations @DeveloperApi()
+         """, true)
+      )
+  }
+
+  // SI-8144
+  {
+    implicit class AttributesAwareNode(val node: NodeSeq) {
+
+      def \@(attrName: String): String =
+        node \ ("@" + attrName) text
+
+      def \@(attrName: String, attrValue: String): NodeSeq =
+        node filter { _ \ ("@" + attrName) exists (_.text == attrValue) }
+    }
+
+    implicit class AssertionAwareNode(node: scala.xml.NodeSeq) {
+
+      def assertTypeLink(expectedUrl: String): Boolean = {
+        val linkElement: NodeSeq = node \\ "div" \@ ("id", "definition") \\ "span" \@ ("class", "permalink") \ "a"
+        linkElement \@ "href" == expectedUrl && linkElement \@ "target" == "_top"
+      }
+
+      def assertMemberLink(group: String)(memberName: String, expectedUrl: String): Boolean = {
+        val linkElement: NodeSeq = node \\ "div" \@ ("id", group) \\ "li" \@ ("name", memberName) \\ "span" \@ ("class", "permalink") \ "a"
+        linkElement \@ "href" == expectedUrl && linkElement \@ "target" == "_top"
+      }
+
+    }
+
+    val files = createTemplates("SI-8144.scala")
+
+    def check(pagePath: String)(f: NodeSeq => org.scalacheck.Prop): org.scalacheck.Prop =
+      files(pagePath) match {
+        case node: scala.xml.Node => f(XMLUtil.stripGroup(node))
+        case _ => false
+      }
+
+    property("SI-8144: Members' permalink - package") = check("some/package.html") { node =>
+      ("type link" |: node.assertTypeLink("../index.html#some.package")) &&
+        ("member: some.pack" |: node.assertMemberLink("values")("some.pack", "../index.html#some.package@pack"))
+    }
+
+    property("SI-8144: Members' permalink - inner package") = check("some/pack/package.html") { node =>
+      ("type link" |: node.assertTypeLink("../../index.html#some.pack.package")) &&
+        ("member: SomeType (object)" |: node.assertMemberLink("values")("some.pack.SomeType", "../../index.html#some.pack.package@SomeType")) &&
+        ("member: SomeType (class)" |: node.assertMemberLink("types")("some.pack.SomeType", "../../index.html#some.pack.package@SomeTypeextendsAnyRef"))
+    }
+
+    property("SI-8144: Members' permalink - companion object") = check("some/pack/SomeType$.html") { node =>
+      ("type link" |: node.assertTypeLink("../../index.html#some.pack.SomeType$")) &&
+        ("member: someVal" |: node.assertMemberLink("allMembers")("some.pack.SomeType#someVal", "../../index.html#some.pack.SomeType$@someVal:String"))
+    }
+
+    property("SI-8144: Members' permalink - class") = check("some/pack/SomeType.html") { node =>
+      ("type link" |: node.assertTypeLink("../../index.html#some.pack.SomeType")) &&
+      ("constructor " |: node.assertMemberLink("constructors")("some.pack.SomeType#<init>", "../../index.html#some.pack.SomeType@<init>(arg:String):some.pack.SomeType")) &&
+        ( "member: type TypeAlias" |: node.assertMemberLink("types")("some.pack.SomeType.TypeAlias", "../../index.html#some.pack.SomeType@TypeAlias=String")) &&
+        ( "member: def >#<():Int " |: node.assertMemberLink("values")("some.pack.SomeType#>#<", "../../index.html#some.pack.SomeType@>#<():Int")) &&
+        ( "member: def >@<():TypeAlias " |: node.assertMemberLink("values")("some.pack.SomeType#>@<", "../../index.html#some.pack.SomeType@>@<():SomeType.this.TypeAlias"))
+    }
+
   }
 }

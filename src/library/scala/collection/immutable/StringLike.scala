@@ -121,36 +121,43 @@ self =>
   }
 
   /** Return all lines in this string in an iterator, excluding trailing line
-   *  end characters, i.e. apply `.stripLineEnd` to all lines
+   *  end characters, i.e., apply `.stripLineEnd` to all lines
    *  returned by `linesWithSeparators`.
    */
   def lines: Iterator[String] =
     linesWithSeparators map (line => new WrappedString(line).stripLineEnd)
 
   /** Return all lines in this string in an iterator, excluding trailing line
-   *  end characters, i.e. apply `.stripLineEnd` to all lines
+   *  end characters, i.e., apply `.stripLineEnd` to all lines
    *  returned by `linesWithSeparators`.
    */
+  @deprecated("Use `lines` instead.","2.11.0")
   def linesIterator: Iterator[String] =
     linesWithSeparators map (line => new WrappedString(line).stripLineEnd)
 
-  /** Returns this string with first character converted to upper case */
+  /** Returns this string with first character converted to upper case.
+   * If the first character of the string is capitalized, it is returned unchanged.
+   */
   def capitalize: String =
     if (toString == null) null
     else if (toString.length == 0) ""
+    else if (toString.charAt(0).isUpper) toString
     else {
       val chars = toString.toCharArray
       chars(0) = chars(0).toUpper
       new String(chars)
     }
 
-  /** Returns this string with the given `prefix` stripped. */
+  /** Returns this string with the given `prefix` stripped. If this string does not
+   *  start with `prefix`, it is returned unchanged.
+   */
   def stripPrefix(prefix: String) =
     if (toString.startsWith(prefix)) toString.substring(prefix.length)
     else toString
 
   /** Returns this string with the given `suffix` stripped. If this string does not
-    * end with `suffix`, it is returned unchanged. */
+   *  end with `suffix`, it is returned unchanged.
+   */
   def stripSuffix(suffix: String) =
     if (toString.endsWith(suffix)) toString.substring(0, toString.length() - suffix.length)
     else toString
@@ -164,8 +171,8 @@ self =>
    *  @return               the resulting string
    */
   def replaceAllLiterally(literal: String, replacement: String): String = {
-    val arg1 = java.util.regex.Pattern.quote(literal)
-    val arg2 = java.util.regex.Matcher.quoteReplacement(replacement)
+    val arg1 = Regex.quote(literal)
+    val arg2 = Regex.quoteReplacement(replacement)
 
     toString.replaceAll(arg1, arg2)
   }

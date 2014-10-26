@@ -1,8 +1,6 @@
 Type in expressions to have them evaluated.
 Type :help for more information.
 
-scala> 
-
 scala> 2 ; 3
 <console>:7: warning: a pure expression does nothing in statement position; you may be omitting necessary parentheses
               2 ;;
@@ -49,6 +47,4 @@ Bovine.x: List[Any] = List(Ruminant(5), Cow, Moooooo)
 scala> Bovine.x
 res4: List[Any] = List(Ruminant(5), Cow, Moooooo)
 
-scala> 
-
-scala> 
+scala> :quit

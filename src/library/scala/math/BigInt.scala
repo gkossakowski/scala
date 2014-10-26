@@ -109,8 +109,7 @@ object BigInt {
  *  @author  Martin Odersky
  *  @version 1.0, 15/07/2003
  */
-@deprecatedInheritance("This class will be made final.", "2.10.0")
-class BigInt(val bigInteger: BigInteger) extends ScalaNumber with ScalaNumericConversions with Serializable {
+final class BigInt(val bigInteger: BigInteger) extends ScalaNumber with ScalaNumericConversions with Serializable {
   /** Returns the hash code for this BigInt. */
   override def hashCode(): Int =
     if (isValidLong) unifiedPrimitiveHashcode()
@@ -120,7 +119,7 @@ class BigInt(val bigInteger: BigInteger) extends ScalaNumber with ScalaNumericCo
    */
   override def equals(that: Any): Boolean = that match {
     case that: BigInt     => this equals that
-    case that: BigDecimal => that.toBigIntExact exists (this equals _)
+    case that: BigDecimal => that equals this
     case that: Double     => isValidDouble && toDouble == that
     case that: Float      => isValidFloat && toFloat == that
     case x                => isValidLong && unifiedPrimitiveEquals(x)
@@ -283,10 +282,10 @@ class BigInt(val bigInteger: BigInteger) extends ScalaNumber with ScalaNumericCo
    */
   def abs: BigInt = new BigInt(this.bigInteger.abs())
 
-  /** Returns the sign of this BigInt, i.e.
+  /** Returns the sign of this BigInt;
    *   -1 if it is less than 0,
-   *   +1 if it is greater than 0
-   *   0  if it is equal to 0
+   *   +1 if it is greater than 0,
+   *   0  if it is equal to 0.
    */
   def signum: Int = this.bigInteger.signum()
 

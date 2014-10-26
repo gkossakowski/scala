@@ -11,10 +11,10 @@ object Properties extends scala.util.PropertiesTrait {
   protected def propCategory   = "compiler"
   protected def pickJarBasedOn = classOf[Global]
 
-  // settings based on jar properties
-  def fileEndingString     = scalaPropOrElse("file.ending", ".scala|.java")
+  // settings based on jar properties, falling back to System prefixed by "scala."
   def residentPromptString = scalaPropOrElse("resident.prompt", "\nnsc> ")
   def shellPromptString    = scalaPropOrElse("shell.prompt", "\nscala> ")
+  def shellInterruptedString = scalaPropOrElse("shell.interrupted", ":quit\n")
 
   // derived values
   def isEmacsShell         = propOrEmpty("env.emacs") != ""

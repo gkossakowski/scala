@@ -13,7 +13,7 @@ trait GenSymbols {
    *  Keeps track of auxiliary symbols that are necessary for this reification session.
    *  These include:
    *    1) Free vars (terms, types and existentials),
-   *    2) Non-locatable symbols (sometimes, e.g. for RefinedTypes, we need to reify these; to do that we create their local copies in the reificode)
+   *    2) Non-locatable symbols (sometimes, e.g. for RefinedTypes, we need to reify these; to do that we create their copies in the reificode)
    *    3) Non-locatable symbols that are referred by #1, #2 and #3
    *
    *  Exposes three main methods:
@@ -90,10 +90,10 @@ trait GenSymbols {
           mirrorBuildCall(nme.selectTerm, rowner, rname)
       }
     } else {
-      // todo. make sure that free methods and free local defs work correctly
+      // todo. make sure that free methods work correctly
       if (sym.isExistential) reifySymDef(sym)
       else if (sym.isTerm) reifyFreeTerm(Ident(sym))
-      else reifyFreeType(Ident(sym))
+      else reifyFreeType(Ident(sym)) // TODO: reify refinement classes
     }
   }
 
@@ -131,9 +131,9 @@ trait GenSymbols {
       if (sym.isCapturedVariable) {
         assert(binding.isInstanceOf[Ident], showRaw(binding))
         val capturedBinding = referenceCapturedVariable(sym)
-        Reification(name, capturedBinding, mirrorBuildCall(nme.newFreeTerm, reify(sym.name.toString), capturedBinding, mirrorBuildCall(nme.flagsFromBits, reify(sym.flags)), reify(origin(sym))))
+        Reification(name, capturedBinding, mirrorBuildCall(nme.newFreeTerm, reify(sym.name.toString), capturedBinding, mirrorBuildCall(nme.FlagsRepr, reify(sym.flags)), reify(origin(sym))))
       } else {
-        Reification(name, binding, mirrorBuildCall(nme.newFreeTerm, reify(sym.name.toString), binding, mirrorBuildCall(nme.flagsFromBits, reify(sym.flags)), reify(origin(sym))))
+        Reification(name, binding, mirrorBuildCall(nme.newFreeTerm, reify(sym.name.toString), binding, mirrorBuildCall(nme.FlagsRepr, reify(sym.flags)), reify(origin(sym))))
       }
     }
 
@@ -142,7 +142,7 @@ trait GenSymbols {
       if (reifyDebug) println("Free type: %s (%s)".format(sym, sym.accurateKindString))
       state.reificationIsConcrete = false
       val name: TermName = nme.REIFY_FREE_PREFIX append sym.name
-      Reification(name, binding, mirrorBuildCall(nme.newFreeType, reify(sym.name.toString), mirrorBuildCall(nme.flagsFromBits, reify(sym.flags)), reify(origin(sym))))
+      Reification(name, binding, mirrorBuildCall(nme.newFreeType, reify(sym.name.toString), mirrorBuildCall(nme.FlagsRepr, reify(sym.flags)), reify(origin(sym))))
     }
 
   def reifySymDef(sym: Symbol): Tree =
@@ -150,7 +150,7 @@ trait GenSymbols {
       if (reifyDebug) println("Sym def: %s (%s)".format(sym, sym.accurateKindString))
       val name: TermName = nme.REIFY_SYMDEF_PREFIX append sym.name
       def reifiedOwner = if (sym.owner.isLocatable) reify(sym.owner) else reifySymDef(sym.owner)
-      Reification(name, Ident(sym), mirrorBuildCall(nme.newNestedSymbol, reifiedOwner, reify(sym.name), reify(sym.pos), mirrorBuildCall(nme.flagsFromBits, reify(sym.flags)), reify(sym.isClass)))
+      Reification(name, Ident(sym), mirrorBuildCall(nme.newNestedSymbol, reifiedOwner, reify(sym.name), reify(sym.pos), mirrorBuildCall(nme.FlagsRepr, reify(sym.flags)), reify(sym.isClass)))
     }
 
   case class Reification(name: Name, binding: Tree, tree: Tree)

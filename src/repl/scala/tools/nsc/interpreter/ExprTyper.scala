@@ -13,7 +13,6 @@ trait ExprTyper {
 
   import repl._
   import global.{ reporter => _, Import => _, _ }
-  import syntaxAnalyzer.UnitParser
   import naming.freshInternalVarName
 
   def symbolOfLine(code: String): Symbol = {
@@ -28,7 +27,7 @@ trait ExprTyper {
         case IR.Success =>
           val sym0 = symbolOfTerm(name)
           // drop NullaryMethodType
-          sym0.cloneSymbol setInfo exitingTyper(sym0.info.finalResultType)
+          sym0.cloneSymbol setInfo exitingTyper(sym0.tpe_*.finalResultType)
         case _          => NoSymbol
       }
     }

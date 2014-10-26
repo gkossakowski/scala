@@ -9,12 +9,61 @@ package scala.tools.nsc.transform.patmat
 import scala.language.postfixOps
 import scala.collection.mutable
 import scala.reflect.internal.util.Statistics
-import scala.reflect.internal.util.Position
 
 trait TreeAndTypeAnalysis extends Debugging {
   import global._
   import definitions._
   import analyzer.Typer
+
+  /** Compute the type T implied for a value `v` matched by a pattern `pat` (with expected type `pt`).
+   *
+   * Usually, this is the pattern's type because pattern matching implies instance-of checks.
+   *
+   * However, Stable Identifier and Literal patterns are matched using `==`,
+   * which does not imply a type for the binder that binds the matched value.
+   *
+   * See SI-1503, SI-5024: don't cast binders to types we're not sure they have
+   *
+   * TODO: update spec as follows (deviation between `**`):
+   *
+   *   A pattern binder x@p consists of a pattern variable x and a pattern p.
+   *   The type of the variable x is the static type T **IMPLIED BY** the pattern p.
+   *   This pattern matches any value v matched by the pattern p
+   *     **Deleted: , provided the run-time type of v is also an instance of T, **
+   *   and it binds the variable name to that value.
+   *
+   *   Addition:
+   *     A pattern `p` _implies_ a type `T` if the pattern matches only values of the type `T`.
+   */
+  def binderTypeImpliedByPattern(pat: Tree, pt: Type, binder: Symbol): Type =
+    pat match {
+      // because `==` decides whether these patterns match, stable identifier patterns (ident or selection)
+      // do not contribute any type information (beyond the pattern's expected type)
+      // e.g., in case x@Nil => x --> all we know about `x` is that it satisfies Nil == x, which could be anything
+      case Ident(_) | Select(_, _) =>
+        if (settings.future) pt
+        else {
+          // TODO: don't warn unless this unsound assumption is actually used in a cast
+          // I tried annotating the type returned here with an internal annotation (`pat.tpe withAnnotation UnsoundAssumptionAnnotation`),
+          // and catching it in the patmat backend when used in a cast (because that would signal the unsound assumption was used),
+          // but the annotation didn't bubble up...
+          // This is a pretty poor approximation.
+          def unsoundAssumptionUsed = binder.name != nme.WILDCARD && !(pt <:< pat.tpe)
+          if (settings.warnUnsoundMatch && unsoundAssumptionUsed)
+            reporter.warning(pat.pos,
+              sm"""The value matched by $pat is bound to ${binder.name}, which may be used under the
+                  |unsound assumption that it has type ${pat.tpe}, whereas we can only safely
+                  |count on it having type $pt, as the pattern is matched using `==` (see SI-1503).""")
+
+          pat.tpe
+        }
+
+
+      // the other patterns imply type tests, so we can safely assume the binder has the pattern's type when the pattern matches
+      // concretely, a literal, type pattern, a case class (the constructor's result type) or extractor (the unapply's argument type) all imply type tests
+      // (and, inductively, an alternative)
+      case _ => pat.tpe
+    }
 
   // we use subtyping as a model for implication between instanceof tests
   // i.e., when S <:< T we assume x.isInstanceOf[S] implies x.isInstanceOf[T]
@@ -50,15 +99,22 @@ trait TreeAndTypeAnalysis extends Debugging {
         case UnitClass =>
           Some(List(UnitTpe))
         case BooleanClass =>
-          Some((List(ConstantType(Constant(true)), ConstantType(Constant(false)))))
+          Some(ConstantTrue :: ConstantFalse :: Nil)
         // TODO case _ if tp.isTupleType => // recurse into component types
         case modSym: ModuleClassSymbol =>
           Some(List(tp))
+        case sym: RefinementClassSymbol =>
+          val parentSubtypes: List[Option[List[Type]]] = tp.parents.map(parent => enumerateSubtypes(parent))
+          if (parentSubtypes exists (_.isDefined))
+            // If any of the parents is enumerable, then the refinement type is enumerable.
+            Some(
+              // We must only include subtypes of the parents that conform to `tp`.
+              // See neg/virtpatmat_exhaust_compound.scala for an example.
+              parentSubtypes flatMap (_.getOrElse(Nil)) filter (_ <:< tp)
+            )
+          else None
         // make sure it's not a primitive, else (5: Byte) match { case 5 => ... } sees no Byte
-        case sym if !sym.isSealed || isPrimitiveValueClass(sym) =>
-          debug.patmat("enum unsealed "+ ((tp, sym, sym.isSealed, isPrimitiveValueClass(sym))))
-          None
-        case sym =>
+        case sym if sym.isSealed =>
           val subclasses = debug.patmatResult(s"enum $sym sealed, subclasses")(
             // symbols which are both sealed and abstract need not be covered themselves, because
             // all of their children must be and they cannot otherwise be created.
@@ -86,6 +142,9 @@ trait TreeAndTypeAnalysis extends Debugging {
               else None
             }
           })
+        case sym =>
+          debug.patmat("enum unsealed "+ ((tp, sym, sym.isSealed, isPrimitiveValueClass(sym))))
+          None
       }
 
     // approximate a type to the static type that is fully checkable at run time,
@@ -99,20 +158,20 @@ trait TreeAndTypeAnalysis extends Debugging {
       object typeArgsToWildcardsExceptArray extends TypeMap {
         // SI-6771 dealias would be enough today, but future proofing with the dealiasWiden.
         // See neg/t6771b.scala for elaboration
-        def apply(tp: Type): Type = tp.dealiasWiden match {
+        def apply(tp: Type): Type = tp.dealias match {
           case TypeRef(pre, sym, args) if args.nonEmpty && (sym ne ArrayClass) =>
             TypeRef(pre, sym, args map (_ => WildcardType))
           case _ =>
             mapOver(tp)
         }
       }
-      debug.patmatResult(s"checkableType($tp)")(typeArgsToWildcardsExceptArray(tp))
+      val result = typeArgsToWildcardsExceptArray(tp)
+      debug.patmatResult(s"checkableType($tp)")(result)
     }
 
     // a type is "uncheckable" (for exhaustivity) if we don't statically know its subtypes (i.e., it's unsealed)
     // we consider tuple types with at least one component of a checkable type as a checkable type
     def uncheckableType(tp: Type): Boolean = {
-      def tupleComponents(tp: Type) = tp.normalize.typeArgs
       val checkable = (
            (isTupleType(tp) && tupleComponents(tp).exists(tp => !uncheckableType(tp)))
         || enumerateSubtypes(tp).nonEmpty)
@@ -261,7 +320,8 @@ trait MatchApproximation extends TreeAndTypeAnalysis with ScalaLogic with MatchT
                 }
                 def nonNullTest(testedBinder: Symbol)                 = uniqueNonNullProp(binderToUniqueTree(testedBinder))
                 def equalsTest(pat: Tree, testedBinder: Symbol)       = uniqueEqualityProp(binderToUniqueTree(testedBinder), unique(pat))
-                def eqTest(pat: Tree, testedBinder: Symbol)           = uniqueEqualityProp(binderToUniqueTree(testedBinder), unique(pat)) // TODO: eq, not ==
+                // rewrite eq test to type test against the singleton type `pat.tpe`; unrelated to == (uniqueEqualityProp), could be null
+                def eqTest(pat: Tree, testedBinder: Symbol)           = uniqueTypeProp(binderToUniqueTree(testedBinder), uniqueTp(pat.tpe))
                 def tru                                               = True
               }
               ttm.renderCondition(condStrategy)
@@ -271,9 +331,9 @@ trait MatchApproximation extends TreeAndTypeAnalysis with ScalaLogic with MatchT
             case SubstOnlyTreeMaker(_, _)                             => True
             case GuardTreeMaker(guard) =>
               guard.tpe match {
-                case ConstantType(Constant(true))  => True
-                case ConstantType(Constant(false)) => False
-                case _                             => handleUnknown(tm)
+                case ConstantTrue  => True
+                case ConstantFalse => False
+                case _             => handleUnknown(tm)
               }
             case ExtractorTreeMaker(_, _, _) |
                  ProductExtractorTreeMaker(_, _) |
@@ -327,13 +387,7 @@ trait MatchApproximation extends TreeAndTypeAnalysis with ScalaLogic with MatchT
       debug.patmat("treeMakers:")
       debug.patmat(alignAcrossRows(cases, ">>"))
     }
-
-    def showTests(testss: List[List[Test]]) = {
-      debug.patmat("tests: ")
-      debug.patmat(alignAcrossRows(testss, "&"))
-    }
   }
-
 }
 
 trait MatchAnalysis extends MatchApproximation {
@@ -342,8 +396,9 @@ trait MatchAnalysis extends MatchApproximation {
   import global.definitions._
 
   trait MatchAnalyzer extends MatchApproximator  {
-    def uncheckedWarning(pos: Position, msg: String) = global.currentUnit.uncheckedWarning(pos, msg)
+    def uncheckedWarning(pos: Position, msg: String) = currentRun.reporting.uncheckedWarning(pos, msg)
     def warn(pos: Position, ex: AnalysisBudget.Exception, kind: String) = uncheckedWarning(pos, s"Cannot check match for $kind.\n${ex.advice}")
+    def reportWarning(message: String) = global.reporter.warning(typer.context.tree.pos, message)
 
   // TODO: model dependencies between variables: if V1 corresponds to (x: List[_]) and V2 is (x.hd), V2 cannot be assigned when V1 = null or V1 = Nil
     // right now hackily implement this by pruning counter-examples
@@ -468,9 +523,11 @@ trait MatchAnalysis extends MatchApproximation {
           val matchFailModels = findAllModelsFor(propToSolvable(matchFails))
 
           val scrutVar = Var(prevBinderTree)
-          val counterExamples = matchFailModels.map(modelToCounterExample(scrutVar))
-
-          val pruned = CounterExample.prune(counterExamples).map(_.toString).sorted
+          val counterExamples = matchFailModels.flatMap(modelToCounterExample(scrutVar))
+          // sorting before pruning is important here in order to
+          // keep neg/t7020.scala stable
+          // since e.g. List(_, _) would cover List(1, _)
+          val pruned = CounterExample.prune(counterExamples.sortBy(_.toString)).map(_.toString)
 
           if (Statistics.canEnable) Statistics.stopTimer(patmatAnaExhaust, start)
           pruned
@@ -560,7 +617,7 @@ trait MatchAnalysis extends MatchApproximation {
     // (the variables don't take into account type information derived from other variables,
     //  so, naively, you might try to construct a counter example like _ :: Nil(_ :: _, _ :: _),
     //  since we didn't realize the tail of the outer cons was a Nil)
-    def modelToCounterExample(scrutVar: Var)(model: Model): CounterExample = {
+    def modelToCounterExample(scrutVar: Var)(model: Model): Option[CounterExample] = {
       // x1 = ...
       // x1.hd = ...
       // x1.tl = ...
@@ -618,6 +675,7 @@ trait MatchAnalysis extends MatchApproximation {
         private val fields: mutable.Map[Symbol, VariableAssignment] = mutable.HashMap.empty
         // need to prune since the model now incorporates all super types of a constant (needed for reachability)
         private lazy val uniqueEqualTo = equalTo filterNot (subsumed => equalTo.exists(better => (better ne subsumed) && instanceOfTpImplies(better.tp, subsumed.tp)))
+        private lazy val inSameDomain = uniqueEqualTo forall (const => variable.domainSyms.exists(_.exists(_.const.tp =:= const.tp)))
         private lazy val prunedEqualTo = uniqueEqualTo filterNot (subsumed => variable.staticTpCheckable <:< subsumed.tp)
         private lazy val ctor       = (prunedEqualTo match { case List(TypeConst(tp)) => tp case _ => variable.staticTpCheckable }).typeSymbol.primaryConstructor
         private lazy val ctorParams = if (ctor.paramss.isEmpty) Nil else ctor.paramss.head
@@ -638,13 +696,13 @@ trait MatchAnalysis extends MatchApproximation {
         // NoExample if the constructor call is ill-typed
         // (thus statically impossible -- can we incorporate this into the formula?)
         // beBrief is used to suppress negative information nested in tuples -- it tends to get too noisy
-        def toCounterExample(beBrief: Boolean = false): CounterExample =
-          if (!allFieldAssignmentsLegal) NoExample
+        def toCounterExample(beBrief: Boolean = false): Option[CounterExample] =
+          if (!allFieldAssignmentsLegal) Some(NoExample)
           else {
             debug.patmat("describing "+ ((variable, equalTo, notEqualTo, fields, cls, allFieldAssignmentsLegal)))
             val res = prunedEqualTo match {
               // a definite assignment to a value
-              case List(eq: ValueConst) if fields.isEmpty => ValueExample(eq)
+              case List(eq: ValueConst) if fields.isEmpty => Some(ValueExample(eq))
 
               // constructor call
               // or we did not gather any information about equality but we have information about the fields
@@ -657,30 +715,50 @@ trait MatchAnalysis extends MatchApproximation {
                   // figure out the constructor arguments from the field assignment
                   val argLen = (caseFieldAccs.length min ctorParams.length)
 
-                  (0 until argLen).map(i => fields.get(caseFieldAccs(i)).map(_.toCounterExample(brevity)) getOrElse WildcardExample).toList
+                  val examples = (0 until argLen).map(i => fields.get(caseFieldAccs(i)).map(_.toCounterExample(brevity)) getOrElse Some(WildcardExample)).toList
+                  sequence(examples)
                 }
 
                 cls match {
-                  case ConsClass               => ListExample(args())
-                  case _ if isTupleSymbol(cls) => TupleExample(args(brevity = true))
-                  case _ => ConstructorExample(cls, args())
+                  case ConsClass                                =>
+                    args().map {
+                      case List(NoExample, l: ListExample) =>
+                        // special case for neg/t7020.scala:
+                        // if we find a counter example `??::*` we report `*::*` instead
+                        // since the `??` originates from uniqueEqualTo containing several instanced of the same type
+                        List(WildcardExample, l)
+                      case args                            => args
+                    }.map(ListExample)
+                  case _ if isTupleSymbol(cls)                  => args(brevity = true).map(TupleExample)
+                  case _ if cls.isSealed && cls.isAbstractClass =>
+                    // don't report sealed abstract classes, since
+                    // 1) they can't be instantiated
+                    // 2) we are already reporting any missing subclass (since we know the full domain)
+                    // (see patmatexhaust.scala)
+                    None
+                  case _                                        => args().map(ConstructorExample(cls, _))
                 }
 
               // a definite assignment to a type
-              case List(eq) if fields.isEmpty => TypeExample(eq)
+              case List(eq) if fields.isEmpty => Some(TypeExample(eq))
 
               // negative information
               case Nil if nonTrivialNonEqualTo.nonEmpty =>
                 // negation tends to get pretty verbose
-                if (beBrief) WildcardExample
+                if (beBrief) Some(WildcardExample)
                 else {
                   val eqTo = equalTo.headOption getOrElse TypeConst(variable.staticTpCheckable)
-                  NegativeExample(eqTo, nonTrivialNonEqualTo)
+                  Some(NegativeExample(eqTo, nonTrivialNonEqualTo))
                 }
 
+              // if uniqueEqualTo contains more than one symbol of the same domain
+              // then we can safely ignore these counter examples since we will eventually encounter
+              // both counter examples separately
+              case _ if inSameDomain => None
+                
               // not a valid counter-example, possibly since we have a definite type but there was a field mismatch
               // TODO: improve reasoning -- in the mean time, a false negative is better than an annoying false positive
-              case _ => NoExample
+              case _ => Some(NoExample)
             }
             debug.patmatResult("described as")(res)
           }

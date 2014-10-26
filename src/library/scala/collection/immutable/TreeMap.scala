@@ -6,8 +6,6 @@
 **                          |/                                          **
 \*                                                                      */
 
-
-
 package scala
 package collection
 package immutable
@@ -46,6 +44,7 @@ object TreeMap extends ImmutableSortedMapFactory[TreeMap] {
  *  @define mayNotTerminateInf
  *  @define willNotTerminateInf
  */
+@deprecatedInheritance("The implementation details of immutable tree maps make inheriting from them unwise.", "2.11.0")
 class TreeMap[A, +B] private (tree: RB.Tree[A, B])(implicit val ordering: Ordering[A])
   extends SortedMap[A, B]
      with SortedMapLike[A, B, TreeMap[A, B]]
@@ -194,7 +193,7 @@ class TreeMap[A, +B] private (tree: RB.Tree[A, B])(implicit val ordering: Orderi
 
   override def keysIterator: Iterator[A] = RB.keysIterator(tree)
   override def keysIteratorFrom(start: A): Iterator[A] = RB.keysIterator(tree, Some(start))
-  
+
   override def valuesIterator: Iterator[B] = RB.valuesIterator(tree)
   override def valuesIteratorFrom(start: A): Iterator[B] = RB.valuesIterator(tree, Some(start))
 
@@ -203,7 +202,3 @@ class TreeMap[A, +B] private (tree: RB.Tree[A, B])(implicit val ordering: Orderi
 
   override def foreach[U](f : ((A,B)) =>  U) = RB.foreach(tree, f)
 }
-
-
-
-

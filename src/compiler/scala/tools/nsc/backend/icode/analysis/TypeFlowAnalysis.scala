@@ -8,6 +8,7 @@ package tools.nsc
 package backend.icode.analysis
 
 import scala.collection.{mutable, immutable}
+import java.util.concurrent.TimeUnit
 
 /** A data-flow analysis on types, that works on `ICode`.
  *
@@ -414,11 +415,11 @@ abstract class TypeFlowAnalysis {
           }
           val concreteMethod = inliner.lookupImplFor(msym, receiver)
           val isCandidate = {
-            ( inliner.isClosureClass(receiver) || concreteMethod.isEffectivelyFinal || receiver.isEffectivelyFinal ) &&
+            ( inliner.isClosureClass(receiver) || concreteMethod.isEffectivelyFinalOrNotOverridden || receiver.isEffectivelyFinalOrNotOverridden ) &&
             !blackballed(concreteMethod)
           }
           if(isCandidate) {
-            remainingCALLs += Pair(cm, CallsiteInfo(b, receiver, result.stack.length, concreteMethod))
+            remainingCALLs(cm) = CallsiteInfo(b, receiver, result.stack.length, concreteMethod)
           } else {
             remainingCALLs.remove(cm)
             isOnWatchlist.remove(cm)
@@ -500,7 +501,7 @@ abstract class TypeFlowAnalysis {
     }
 
     private def isReceiverKnown(cm: opcodes.CALL_METHOD): Boolean = {
-      cm.method.isEffectivelyFinal && cm.method.owner.isEffectivelyFinal
+      cm.method.isEffectivelyFinalOrNotOverridden && cm.method.owner.isEffectivelyFinalOrNotOverridden
     }
 
     private def putOnRadar(blocks: Traversable[BasicBlock]) {
@@ -709,14 +710,14 @@ abstract class TypeFlowAnalysis {
     private var lastStart = 0L
 
     def start() {
-      lastStart = System.currentTimeMillis
+      lastStart = System.nanoTime()
     }
 
     /** Stop the timer and return the number of milliseconds since the last
      * call to start. The 'millis' field is increased by the elapsed time.
      */
     def stop: Long = {
-      val elapsed = System.currentTimeMillis - lastStart
+      val elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - lastStart)
       millis += elapsed
       elapsed
     }

@@ -35,11 +35,15 @@ abstract class Attachments { self =>
   def all: Set[Any] = Set.empty
 
   private def matchesTag[T: ClassTag](datum: Any) =
-    classTag[T].runtimeClass == datum.getClass
+    classTag[T].runtimeClass.isInstance(datum)
 
   /** An underlying payload of the given class type `T`. */
   def get[T: ClassTag]: Option[T] =
     (all filter matchesTag[T]).headOption.asInstanceOf[Option[T]]
+
+  /** Check underlying payload contains an instance of type `T`. */
+  def contains[T: ClassTag]: Boolean =
+    !isEmpty && (all exists matchesTag[T])
 
   /** Creates a copy of this attachment with the payload slot of T added/updated with the provided value.
    *  Replaces an existing payload of the same type, if exists.
@@ -53,6 +57,8 @@ abstract class Attachments { self =>
     if (newAll.isEmpty) pos.asInstanceOf[Attachments { type Pos = self.Pos }]
     else new NonemptyAttachments[Pos](this.pos, newAll)
   }
+
+  def isEmpty: Boolean = true
 }
 
 // SI-7018: This used to be an inner class of `Attachments`, but that led to a memory leak in the
@@ -60,4 +66,5 @@ abstract class Attachments { self =>
 private final class NonemptyAttachments[P >: Null](override val pos: P, override val all: Set[Any]) extends Attachments {
   type Pos = P
   def withPos(newPos: Pos) = new NonemptyAttachments(newPos, all)
+  override def isEmpty: Boolean = false
 }

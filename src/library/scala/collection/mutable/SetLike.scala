@@ -16,19 +16,20 @@ import scala.annotation.migration
 import parallel.mutable.ParSet
 
 /** A template trait for mutable sets of type `mutable.Set[A]`.
+ *
+ *    This trait provides most of the operations of a `mutable.Set` independently of its representation.
+ *    It is typically inherited by concrete implementations of sets.
+ *
+ *  $setNote
+ *
  *  @tparam A    the type of the elements of the set
  *  @tparam This the type of the set itself.
- *
- *  $setnote
  *
  *  @author  Martin Odersky
  *  @version 2.8
  *  @since 2.8
  *
- *  @define setnote
- *  @note
- *    This trait provides most of the operations of a `mutable.Set` independently of its representation.
- *    It is typically inherited by concrete implementations of sets.
+ *  @define setNote
  *
  *    To implement a concrete mutable set, you need to provide implementations
  *    of the following methods:
@@ -36,13 +37,13 @@ import parallel.mutable.ParSet
  *       def contains(elem: A): Boolean
  *       def iterator: Iterator[A]
  *       def += (elem: A): this.type
- *       def -= (elem: A): this.type</pre>
+ *       def -= (elem: A): this.type
  *    }}}
  *    If you wish that methods like `take`,
  *    `drop`, `filter` return the same kind of set,
  *    you should also override:
  *    {{{
- *       def empty: This</pre>
+ *       def empty: This
  *    }}}
  *    It is also good idea to override methods `foreach` and
  *    `size` for efficiency.
@@ -121,7 +122,9 @@ trait SetLike[A, +This <: SetLike[A, This] with Set[A]]
    *             which `p` returns `true` are retained in the set; all others
    *             are removed.
    */
-  def retain(p: A => Boolean): Unit = for (elem <- this.toList) if (!p(elem)) this -= elem
+  def retain(p: A => Boolean): Unit =
+    for (elem <- this.toList) // SI-7269 toList avoids ConcurrentModificationException
+      if (!p(elem)) this -= elem
 
   /** Removes all elements from the set. After this operation is completed,
    *  the set will be empty.
@@ -208,11 +211,12 @@ trait SetLike[A, +This <: SetLike[A, This] with Set[A]]
    *  @throws `Predef.UnsupportedOperationException`
    *  if the message was not understood.
    */
-   def <<(cmd: Message[A]): Unit = cmd match {
-     case Include(_, x)     => this += x
-     case Remove(_, x)      => this -= x
-     case Reset()           => clear()
-     case s: Script[_]      => s.iterator foreach <<
-     case _                 => throw new UnsupportedOperationException("message " + cmd + " not understood")
-   }
+  @deprecated("Scripting is deprecated.", "2.11.0")
+  def <<(cmd: Message[A]): Unit = cmd match {
+    case Include(_, x)     => this += x
+    case Remove(_, x)      => this -= x
+    case Reset()           => clear()
+    case s: Script[_]      => s.iterator foreach <<
+    case _                 => throw new UnsupportedOperationException("message " + cmd + " not understood")
+  }
 }

@@ -1,24 +1,23 @@
 package scala.reflect.macros
 package contexts
 
-import scala.language.existentials
-import scala.tools.reflect.ToolBox
-import scala.tools.reflect.ToolBoxError
+import scala.tools.nsc.reporters.StoreReporter
 
 trait Parsers {
   self: Context =>
+  import global._
 
-  def parse(code: String): Tree =
-    // todo. provide decent implementation
-    // see `Typers.typedUseCase` for details
+  def parse(code: String) = {
+    val sreporter = new StoreReporter()
+    val oldReporter = global.reporter
     try {
-      import scala.reflect.runtime.{universe => ru}
-      val parsed = ru.rootMirror.mkToolBox().parse(code)
-      val importer = universe.mkImporter(ru)
-      importer.importTree(parsed)
-    } catch {
-      case ToolBoxError(msg, cause) =>
-        // todo. provide a position
-        throw new ParseException(universe.NoPosition, msg)
-    }
+      global.reporter = sreporter
+      val parser = newUnitParser(new CompilationUnit(newSourceFile(code, "<macro>")))
+      val tree = gen.mkTreeOrBlock(parser.parseStatsOrPackages())
+      sreporter.infos.foreach {
+        case sreporter.Info(pos, msg, sreporter.ERROR) => throw ParseException(pos, msg)
+      }
+      tree
+    } finally global.reporter = oldReporter
+  }
 }

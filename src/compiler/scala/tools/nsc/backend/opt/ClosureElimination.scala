@@ -18,6 +18,8 @@ abstract class ClosureElimination extends SubComponent {
 
   val phaseName = "closelim"
 
+  override val enabled: Boolean = settings.Xcloselim
+
   /** Create a new phase */
   override def newPhase(p: Phase) = new ClosureEliminationPhase(p)
 
@@ -54,11 +56,8 @@ abstract class ClosureElimination extends SubComponent {
       case (BOX(t1), UNBOX(t2)) if (t1 == t2) =>
         Some(Nil)
 
-      case (LOAD_FIELD(sym, isStatic), DROP(_)) if !sym.hasAnnotation(definitions.VolatileAttr) =>
-        if (isStatic)
-          Some(Nil)
-        else
-          Some(DROP(REFERENCE(definitions.ObjectClass)) :: Nil)
+      case (LOAD_FIELD(sym, /* isStatic */false), DROP(_)) if !sym.hasAnnotation(definitions.VolatileAttr) && inliner.isClosureClass(sym.owner) =>
+        Some(DROP(REFERENCE(definitions.ObjectClass)) :: Nil)
 
       case _ => None
     }

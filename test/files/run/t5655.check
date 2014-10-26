@@ -1,8 +1,6 @@
 Type in expressions to have them evaluated.
 Type :help for more information.
 
-scala> 
-
 scala> object x { def x={} }
 defined object x
 
@@ -25,6 +23,4 @@ and import x
               x
               ^
 
-scala> 
-
-scala> 
+scala> :quit

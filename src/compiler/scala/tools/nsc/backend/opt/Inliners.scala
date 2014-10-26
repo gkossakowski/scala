@@ -49,6 +49,8 @@ abstract class Inliners extends SubComponent {
 
   val phaseName = "inliner"
 
+  override val enabled: Boolean = settings.inline
+
   /** Debug - for timing the inliner. */
   /****
   private def timed[T](s: String, body: => T): T = {
@@ -70,8 +72,8 @@ abstract class Inliners extends SubComponent {
     def needsLookup = (
          (clazz != NoSymbol)
       && (clazz != sym.owner)
-      && !sym.isEffectivelyFinal
-      && clazz.isEffectivelyFinal
+      && !sym.isEffectivelyFinalOrNotOverridden
+      && clazz.isEffectivelyFinalOrNotOverridden
     )
     def lookup(clazz: Symbol): Symbol = {
       // println("\t\tlooking up " + meth + " in " + clazz.fullName + " meth.owner = " + meth.owner)
@@ -193,7 +195,7 @@ abstract class Inliners extends SubComponent {
 
     /** The current iclass */
     private var currentIClazz: IClass = _
-    private def warn(pos: Position, msg: String) = currentIClazz.cunit.inlinerWarning(pos, msg)
+    private def warn(pos: Position, msg: String) = currentRun.reporting.inlinerWarning(pos, msg)
 
     private def ownedName(sym: Symbol): String = exitingUncurry {
       val count = (
@@ -281,7 +283,7 @@ abstract class Inliners extends SubComponent {
       }
 
     val tfa   = new analysis.MTFAGrowable()
-    tfa.stat  = global.settings.Ystatistics.value
+    tfa.stat  = global.settings.YstatisticsEnabled
     val staleOut      = new mutable.ListBuffer[BasicBlock]
     val splicedBlocks = mutable.Set.empty[BasicBlock]
     val staleIn       = mutable.Set.empty[BasicBlock]
@@ -360,7 +362,7 @@ abstract class Inliners extends SubComponent {
         for(x <- inputBlocks; easyCake = callsites(x); if easyCake.nonEmpty) {
           breakable {
             for(ocm <- easyCake) {
-              assert(ocm.method.isEffectivelyFinal && ocm.method.owner.isEffectivelyFinal)
+              assert(ocm.method.isEffectivelyFinalOrNotOverridden && ocm.method.owner.isEffectivelyFinalOrNotOverridden)
               if(analyzeInc(ocm, x, ocm.method.owner, -1, ocm.method)) {
                 inlineCount += 1
                 break()
@@ -407,8 +409,8 @@ abstract class Inliners extends SubComponent {
 
         def isCandidate = (
              isClosureClass(receiver)
-          || concreteMethod.isEffectivelyFinal
-          || receiver.isEffectivelyFinal
+          || concreteMethod.isEffectivelyFinalOrNotOverridden
+          || receiver.isEffectivelyFinalOrNotOverridden
         )
 
         def isApply     = concreteMethod.name == nme.apply
@@ -423,7 +425,7 @@ abstract class Inliners extends SubComponent {
         debuglog("Treating " + i
               + "\n\treceiver: " + receiver
               + "\n\ticodes.available: " + isAvailable
-              + "\n\tconcreteMethod.isEffectivelyFinal: " + concreteMethod.isEffectivelyFinal)
+              + "\n\tconcreteMethod.isEffectivelyFinalOrNotOverridden: " + concreteMethod.isEffectivelyFinalOrNotOverridden)
 
         if (!isCandidate) warnNoInline("it can be overridden")
         else if (!isAvailable) warnNoInline("bytecode unavailable")
@@ -441,7 +443,6 @@ abstract class Inliners extends SubComponent {
               case DontInlineHere(msg)                       => warnNoInline(msg)
               case NeverSafeToInline                         => false
               case InlineableAtThisCaller                    => true
-              case inl @ FeasibleInline(_, _) if !inl.isSafe => false
               case FeasibleInline(required, toPublicize)     =>
                 for (f <- toPublicize) {
                   inlineLog("access", f, "making public")
@@ -591,7 +592,7 @@ abstract class Inliners extends SubComponent {
     /** Should method 'sym' being called in 'receiver' be loaded from disk? */
     def shouldLoadImplFor(sym: Symbol, receiver: Symbol): Boolean = {
       def alwaysLoad    = (receiver.enclosingPackage == RuntimePackage) || (receiver == PredefModule.moduleClass)
-      def loadCondition = sym.isEffectivelyFinal && isMonadicMethod(sym) && isHigherOrderMethod(sym)
+      def loadCondition = sym.isEffectivelyFinalOrNotOverridden && isMonadicMethod(sym) && isHigherOrderMethod(sym)
 
       val res = hasInline(sym) || alwaysLoad || loadCondition
       debuglog("shouldLoadImplFor: " + receiver + "." + sym + ": " + res)
@@ -736,16 +737,11 @@ abstract class Inliners extends SubComponent {
      *   - either log the reason for failure --- case (b) ---,
      *   - or perform inlining --- case (a) ---.
      */
-    sealed abstract class InlineSafetyInfo {
-      def isSafe   = false
-    }
+    sealed abstract class InlineSafetyInfo
     case object NeverSafeToInline           extends InlineSafetyInfo
-    case object InlineableAtThisCaller      extends InlineSafetyInfo { override def isSafe = true }
+    case object InlineableAtThisCaller      extends InlineSafetyInfo
     case class  DontInlineHere(msg: String) extends InlineSafetyInfo
-    case class  FeasibleInline(accessNeeded: NonPublicRefs.Value,
-                               toBecomePublic: List[Symbol]) extends InlineSafetyInfo {
-      override def isSafe = true
-    }
+    case class  FeasibleInline(accessNeeded: NonPublicRefs.Value, toBecomePublic: List[Symbol]) extends InlineSafetyInfo
 
     case class AccessReq(
       accessNeeded:   NonPublicRefs.Value,

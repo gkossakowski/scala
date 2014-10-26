@@ -273,7 +273,7 @@ trait SeqLike[+A, +Repr] extends Any with IterableLike[A, Repr] with GenSeqLike[
 
   def reverseMap[B, That](f: A => B)(implicit bf: CanBuildFrom[Repr, B, That]): That = {
     var xs: List[A] = List()
-    for (x <- this.seq)
+    for (x <- this)
       xs = x :: xs
     val b = bf(repr)
     for (x <- xs)
@@ -478,7 +478,7 @@ trait SeqLike[+A, +Repr] extends Any with IterableLike[A, Repr] with GenSeqLike[
 
   private def occCounts[B](sq: Seq[B]): mutable.Map[B, Int] = {
     val occ = new mutable.HashMap[B, Int] { override def default(k: B) = 0 }
-    for (y <- sq.seq) occ(y) += 1
+    for (y <- sq) occ(y) += 1
     occ
   }
 
@@ -509,11 +509,14 @@ trait SeqLike[+A, +Repr] extends Any with IterableLike[A, Repr] with GenSeqLike[
   }
 
   def updated[B >: A, That](index: Int, elem: B)(implicit bf: CanBuildFrom[Repr, B, That]): That = {
+    if (index < 0) throw new IndexOutOfBoundsException(index.toString)
     val b = bf(repr)
     val (prefix, rest) = this.splitAt(index)
+    val restColl = toCollection(rest)
+    if (restColl.isEmpty) throw new IndexOutOfBoundsException(index.toString)
     b ++= toCollection(prefix)
     b += elem
-    b ++= toCollection(rest).view.tail
+    b ++= restColl.view.tail
     b.result()
   }
 
@@ -608,7 +611,7 @@ trait SeqLike[+A, +Repr] extends Any with IterableLike[A, Repr] with GenSeqLike[
     val len = this.length
     val arr = new ArraySeq[A](len)
     var i = 0
-    for (x <- this.seq) {
+    for (x <- this) {
       arr(i) = x
       i += 1
     }
@@ -622,7 +625,7 @@ trait SeqLike[+A, +Repr] extends Any with IterableLike[A, Repr] with GenSeqLike[
   /** Converts this $coll to a sequence.
    *  $willNotTerminateInf
    *
-   *  Overridden for efficiency.
+   *  A new collection will not be built; in particular, lazy sequences will stay lazy.
    */
   override def toSeq: Seq[A] = thisCollection
 

@@ -5,17 +5,17 @@ package macros
 /**
  * <span class="badge badge-red" style="float: right;">EXPERIMENTAL</span>
  *
- * A slice of [[scala.reflect.macros.Context the Scala macros context]] that
+ * A slice of [[scala.reflect.macros.blackbox.Context the Scala macros context]] that
  *  exposes functions to save reflection artifacts for runtime.
  */
 trait Reifiers {
-  self: Context =>
+  self: blackbox.Context =>
 
   /** Given a tree, generate a tree that when compiled and executed produces the original tree.
    *  For more information and examples see the documentation for `Universe.reify`.
    *
    *  The produced tree will be bound to the specified `universe` and `mirror`.
-   *  Possible values for `universe` include `universe.treeBuild.mkRuntimeUniverseRef`.
+   *  Possible values for `universe` include `universe.internal.gen.mkRuntimeUniverseRef`.
    *  Possible values for `mirror` include `EmptyTree` (in that case the reifier will automatically pick an appropriate mirror).
    *
    *  This function is deeply connected to `Universe.reify`, a macro that reifies arbitrary expressions into runtime trees.

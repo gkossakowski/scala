@@ -1,7 +1,7 @@
-import scala.reflect.macros.{Context => Ctx}
+import scala.reflect.macros.blackbox.Context
 
 object Impls {
-  def foo(c: Ctx)(x: Int) = ???
+  def foo(c: Context)(x: Int) = ???
 }
 
 object Macros {

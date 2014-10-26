@@ -2,8 +2,8 @@ reload: Completions.scala
 
 askTypeCompletion at Completions.scala(17,9)
 ================================================================================
-[response] askCompletionAt (17,9)
-retrieved 43 members
+[response] askTypeCompletion at (17,9)
+retrieved 37 members
 [inaccessible] private def privateM: String
 [inaccessible] private[this] val privateV: String
 [inaccessible] private[this] val protectedV: String
@@ -22,10 +22,8 @@ def hashCode(): Int
 def toString(): String
 def →[B](y: B): (test.Compat.type, B)
 final def !=(x$1: Any): Boolean
-final def !=(x$1: AnyRef): Boolean
 final def ##(): Int
 final def ==(x$1: Any): Boolean
-final def ==(x$1: AnyRef): Boolean
 final def asInstanceOf[T0]: T0
 final def eq(x$1: AnyRef): Boolean
 final def isInstanceOf[T0]: Boolean
@@ -39,9 +37,5 @@ final def wait(x$1: Long,x$2: Int): Unit
 final private[this] val CONST_STRING: String("constant")
 lazy private[this] var foo: Int
 private[package test] def pkgPrivateM: String
-private[this] val __leftOfArrow: test.Compat.type
-private[this] val __resultOfEnsuring: test.Compat.type
-private[this] val __stringToFormat: test.Compat.type
-private[this] val __thingToAdd: test.Compat.type
 private[this] val pkgPrivateV: String
 ================================================================================

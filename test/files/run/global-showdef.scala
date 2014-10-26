@@ -40,8 +40,8 @@ object Bippy {
 
     new Global(settings)
   }
-  
-  def slurp(body: => Unit): String = stringFromStream { stream => 
+
+  def slurp(body: => Unit): String = stringFromStream { stream =>
     Console.withOut(stream) {
       Console.withErr(stream) {
         body
@@ -54,15 +54,15 @@ object Bippy {
       val run = new compiler.Run()
       run.compileSources(List(src))
     }
-    (output split "\\n").toList
+    output.lines.toList
   }
   def showClass(name: String) = lines("-Yshow:typer", "-Xshow-class", name)
   def showObject(name: String) = lines("-Yshow:typer", "-Xshow-object", name)
-  
+
   def show(xs: List[String]) = {
     xs filter (x => (x contains "def showdefTestMember") || (x startsWith "<<-- ")) foreach println
   }
-  
+
   def main(args: Array[String]) {
     show(List("Bippy", "Bippy#BippyType", "Bippy.BippyType", "Bippy#Boppity", "Bippy#Boppity#Boo") flatMap showClass)
     show(List("Bippy", "Bippy#Boppity#Boo") flatMap showObject)

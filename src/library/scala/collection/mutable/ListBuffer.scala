@@ -13,6 +13,7 @@ package mutable
 import generic._
 import immutable.{List, Nil, ::}
 import java.io._
+import scala.annotation.migration
 
 /** A `Buffer` implementation back up by a list. It provides constant time
  *  prepend and append. Most other operations are linear.
@@ -262,7 +263,7 @@ final class ListBuffer[A]
    *  @param n         the index which refers to the first element to remove.
    *  @param count     the number of elements to remove.
    */
-  @scala.annotation.migration("Invalid input values will be rejected in future releases.", "2.11")
+  @migration("Invalid input values will be rejected in future releases.", "2.11")
   override def remove(n: Int, count: Int) {
     if (n >= len)
       return
@@ -381,6 +382,12 @@ final class ListBuffer[A]
     this
   }
 
+  /** Returns an iterator over this `ListBuffer`.  The iterator will reflect
+   *  changes made to the underlying `ListBuffer` beyond the next element;
+   *  the next element's value is cached so that `hasNext` and `next` are
+   *  guaranteed to be consistent.  In particular, an empty `ListBuffer`
+   *  will give an empty iterator even if the `ListBuffer` is later filled.
+   */
   override def iterator: Iterator[A] = new AbstractIterator[A] {
     // Have to be careful iterating over mutable structures.
     // This used to have "(cursor ne last0)" as part of its hasNext
@@ -389,26 +396,19 @@ final class ListBuffer[A]
     // a structure while iterating, but we should never return hasNext == true
     // on exhausted iterators (thus creating exceptions) merely because
     // values were changed in-place.
-    var cursor: List[A] = null
-    var delivered = 0
+    var cursor: List[A] = if (ListBuffer.this.isEmpty) Nil else start
 
-    // Note: arguably this should not be a "dynamic test" against
-    // the present length of the buffer, but fixed at the size of the
-    // buffer when the iterator is created.  At the moment such a
-    // change breaks tests: see comment on def units in Global.scala.
-    def hasNext: Boolean = delivered < ListBuffer.this.length
+    def hasNext: Boolean = cursor ne Nil
     def next(): A =
-      if (!hasNext)
-        throw new NoSuchElementException("next on empty Iterator")
+      if (!hasNext) throw new NoSuchElementException("next on empty Iterator")
       else {
-        if (cursor eq null) cursor = start
-        else cursor = cursor.tail
-        delivered += 1
-        cursor.head
+        val ans = cursor.head
+        cursor = cursor.tail
+        ans
       }
   }
 
-  /** expose the underlying list but do not mark it as exported */
+  @deprecated("The result of this method will change along with this buffer, which is often not what's expected.", "2.11.0")
   override def readOnly: List[A] = start
 
   // Private methods

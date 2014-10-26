@@ -1,10 +1,10 @@
-import scala.reflect.macros.Context
+import scala.reflect.macros.whitebox.Context
 import language.experimental.macros
 
 object Interpolation {
   implicit class TestInterpolation(c: StringContext) {
     object t {
-      def unapply[T](x: T) = macro Macros.unapplyImpl[T]
+      def unapply[T](x: T): Any = macro Macros.unapplyImpl[T]
     }
   }
 }

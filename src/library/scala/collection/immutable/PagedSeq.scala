@@ -126,6 +126,7 @@ import PagedSeq._
  *  @define mayNotTerminateInf
  *  @define willNotTerminateInf
  */
+@deprecatedInheritance("The implementation details of paged sequences make inheriting from them unwise.", "2.11.0")
 class PagedSeq[T: ClassTag] protected(
   more: (Array[T], Int, Int) => Int,
   first1: Page[T],
@@ -187,7 +188,10 @@ extends scala.collection.AbstractSeq[T]
     val s = start + _start
     val e = if (_end == UndeterminedEnd) _end else start + _end
     var f = first1
-    while (f.end <= s && !f.isLast) f = f.next
+    while (f.end <= s && !f.isLast) {
+      if (f.next eq null) f.addMore(more)
+      f = f.next
+    }
     new PagedSeq(more, f, s, e)
   }
 

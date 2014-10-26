@@ -7,12 +7,9 @@ package scala
 package tools
 package nsc
 
-import java.io.{ OutputStream, PrintStream, ByteArrayOutputStream, PrintWriter, StringWriter }
+import java.io.{ OutputStream, PrintStream, ByteArrayOutputStream, PrintWriter, StringWriter, Reader }
 
 package object util {
-
-  implicit def postfixOps = scala.language.postfixOps // make all postfix ops in this package compile without warning
-
   // forwarder for old code that builds against 2.9 and 2.10
   val Chars = scala.reflect.internal.Chars
 
@@ -49,6 +46,17 @@ package object util {
     (result, ts2 filterNot (ts1 contains _))
   }
 
+  def stringFromReader(reader: Reader) = {
+    val writer = new StringWriter()
+    var c = reader.read()
+    while(c != -1) {
+      writer.write(c)
+      c = reader.read()
+    }
+    reader.close()
+    writer.toString()
+  }
+
   /** Generate a string using a routine that wants to write on a stream. */
   def stringFromWriter(writer: PrintWriter => Unit): String = {
     val stringWriter = new StringWriter()
@@ -78,7 +86,7 @@ package object util {
     s"$clazz$msg @ $frame"
   }
 
-  implicit class StackTraceOps(val e: Throwable) extends AnyVal with StackTracing {
+  implicit class StackTraceOps(private val e: Throwable) extends AnyVal with StackTracing {
     /** Format the stack trace, returning the prefix consisting of frames that satisfy
      *  a given predicate.
      *  The format is similar to the typical case described in the JavaDoc
@@ -93,51 +101,22 @@ package object util {
 
   lazy val trace = new SimpleTracer(System.out)
 
-  @deprecated("Moved to scala.reflect.internal.util.StringOps", "2.10.0")
-  val StringOps = scala.reflect.internal.util.StringOps
-
-  @deprecated("Moved to scala.reflect.internal.util.StringOps", "2.10.0")
-  type StringOps = scala.reflect.internal.util.StringOps
-
-  @deprecated("scala.reflect.internal.util.WeakHashSet", "2.10.0")
-  type WeakHashSet[T <: AnyRef] = scala.reflect.internal.util.WeakHashSet[T]
-
-  @deprecated("Moved to scala.reflect.internal.util.Position", "2.10.0")
-  val Position = scala.reflect.internal.util.Position
-
+  // These four deprecated since 2.10.0 are still used in (at least)
+  // the sbt 0.12.4 compiler interface.
   @deprecated("Moved to scala.reflect.internal.util.Position", "2.10.0")
   type Position = scala.reflect.internal.util.Position
-
   @deprecated("Moved to scala.reflect.internal.util.NoPosition", "2.10.0")
   val NoPosition = scala.reflect.internal.util.NoPosition
-
   @deprecated("Moved to scala.reflect.internal.util.FakePos", "2.10.0")
   val FakePos = scala.reflect.internal.util.FakePos
-
   @deprecated("Moved to scala.reflect.internal.util.FakePos", "2.10.0")
   type FakePos = scala.reflect.internal.util.FakePos
 
-  @deprecated("Moved to scala.reflect.internal.util.OffsetPosition", "2.10.0")
-  type OffsetPosition = scala.reflect.internal.util.OffsetPosition
-
+  // These three were still used in scala-refactoring.
   @deprecated("Moved to scala.reflect.internal.util.RangePosition", "2.10.0")
   type RangePosition = scala.reflect.internal.util.RangePosition
-
   @deprecated("Moved to scala.reflect.internal.util.SourceFile", "2.10.0")
   type SourceFile = scala.reflect.internal.util.SourceFile
-
-  @deprecated("Moved to scala.reflect.internal.util.NoSourceFile", "2.10.0")
-  val NoSourceFile = scala.reflect.internal.util.NoSourceFile
-
-  @deprecated("Moved to scala.reflect.internal.util.NoFile", "2.10.0")
-  val NoFile = scala.reflect.internal.util.NoFile
-
-  @deprecated("Moved to scala.reflect.internal.util.ScriptSourceFile", "2.10.0")
-  val ScriptSourceFile = scala.reflect.internal.util.ScriptSourceFile
-
-  @deprecated("Moved to scala.reflect.internal.util.ScriptSourceFile", "2.10.0")
-  type ScriptSourceFile = scala.reflect.internal.util.ScriptSourceFile
-
   @deprecated("Moved to scala.reflect.internal.util.BatchSourceFile", "2.10.0")
   type BatchSourceFile = scala.reflect.internal.util.BatchSourceFile
 

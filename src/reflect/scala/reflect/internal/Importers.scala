@@ -4,11 +4,12 @@ package internal
 
 import scala.collection.mutable.WeakHashMap
 import scala.ref.WeakReference
+import scala.reflect.internal.Flags._
 
 // SI-6241: move importers to a mirror
-trait Importers extends api.Importers { to: SymbolTable =>
+trait Importers { to: SymbolTable =>
 
-  def mkImporter(from0: api.Universe): Importer { val from: from0.type } = (
+  override def mkImporter(from0: api.Universe): Importer { val from: from0.type } = (
     if (to eq from0) {
       new Importer {
         val from = from0
@@ -77,6 +78,7 @@ trait Importers extends api.Importers { to: SymbolTable =>
             }
             my setInfo GenPolyType(mytypeParams, importType(theirCore))
             my setAnnotations (their.annotations map importAnnotationInfo)
+            markAllCompleted(my)
           }
         }
       } finally {
@@ -132,6 +134,7 @@ trait Importers extends api.Importers { to: SymbolTable =>
           myowner.newTypeSymbol(myname.toTypeName, mypos, myflags)
       }
       symMap.weakUpdate(their, my)
+      markFlagsCompleted(my)(mask = AllFlags)
       my setInfo recreatedSymbolCompleter(my, their)
     }
 
@@ -250,14 +253,16 @@ trait Importers extends api.Importers { to: SymbolTable =>
         newExistentialType(tparams map importSymbol, importType(result))
       case from.OverloadedType(pre, alts) =>
         OverloadedType(importType(pre), alts map importSymbol)
+      case from.ImportType(qual) =>
+        ImportType(importTree(qual))
       case from.AntiPolyType(pre, targs) =>
         AntiPolyType(importType(pre), targs map importType)
       case their: from.TypeVar =>
         val myconstr = new TypeConstraint(their.constr.loBounds map importType, their.constr.hiBounds map importType)
         myconstr.inst = importType(their.constr.inst)
         TypeVar(importType(their.origin), myconstr, their.typeArgs map importType, their.params map importSymbol)
-      case from.AnnotatedType(annots, result, selfsym) =>
-        AnnotatedType(annots map importAnnotationInfo, importType(result), importSymbol(selfsym))
+      case from.AnnotatedType(annots, result) =>
+        AnnotatedType(annots map importAnnotationInfo, importType(result))
       case from.ErrorType =>
         ErrorType
       case from.WildcardType =>
@@ -308,8 +313,8 @@ trait Importers extends api.Importers { to: SymbolTable =>
         new PackageDef(importRefTree(pid), stats map importTree)
       case from.ModuleDef(mods, name, impl) =>
         new ModuleDef(importModifiers(mods), importName(name).toTermName, importTemplate(impl))
-      case from.emptyValDef =>
-        emptyValDef
+      case from.noSelfType =>
+        noSelfType
       case from.pendingSuperCall =>
         pendingSuperCall
       case from.ValDef(mods, name, tpt, rhs) =>
@@ -399,7 +404,7 @@ trait Importers extends api.Importers { to: SymbolTable =>
       case from.TypeBoundsTree(lo, hi) =>
         new TypeBoundsTree(importTree(lo), importTree(hi))
       case from.ExistentialTypeTree(tpt, whereClauses) =>
-        new ExistentialTypeTree(importTree(tpt), whereClauses map importTree)
+        new ExistentialTypeTree(importTree(tpt), whereClauses map importMemberDef)
       case from.EmptyTree =>
         EmptyTree
       case null =>
@@ -412,15 +417,19 @@ trait Importers extends api.Importers { to: SymbolTable =>
         addFixup(recreatedTreeCompleter(their, my))
         tryFixup()
         // we have to be careful with position import as some shared trees
-        // like EmptyTree, emptyValDef don't support position assignment
+        // like EmptyTree, noSelfType don't support position assignment
         if (their.pos != NoPosition) {
           my.setPos(importPosition(their.pos))
         }
       }
+      importAttachments(their.attachments.all).foreach { my.updateAttachment(_) }
       my
     }
 
     // ============== MISCELLANEOUS ==============
+
+    def importAttachments(attachments: Set[Any]): Set[Any] =
+      attachments.collect { case ia: ImportableAttachment => ia.importAttachment(this) }
 
     def importAnnotationInfo(ann: from.AnnotationInfo): AnnotationInfo = {
       val atp1 = importType(ann.atp)
@@ -461,6 +470,7 @@ trait Importers extends api.Importers { to: SymbolTable =>
       new ImportSelector(importName(sel.name), sel.namePos, if (sel.rename != null) importName(sel.rename) else null, sel.renamePos)
     def importValDef(tree: from.ValDef): ValDef = importTree(tree).asInstanceOf[ValDef]
     def importTypeDef(tree: from.TypeDef): TypeDef = importTree(tree).asInstanceOf[TypeDef]
+    def importMemberDef(tree: from.MemberDef): MemberDef = importTree(tree).asInstanceOf[MemberDef]
     def importTemplate(tree: from.Template): Template = importTree(tree).asInstanceOf[Template]
     def importRefTree(tree: from.RefTree): RefTree = importTree(tree).asInstanceOf[RefTree]
     def importIdent(tree: from.Ident): Ident = importTree(tree).asInstanceOf[Ident]

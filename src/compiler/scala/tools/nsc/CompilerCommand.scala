@@ -20,14 +20,17 @@ class CompilerCommand(arguments: List[String], val settings: Settings) {
   def ok    = processArgumentsResult._1
   def files = processArgumentsResult._2
 
-  /** The name of the command */
+  /** The name of the command. */
   def cmdName = "scalac"
+
+  /** A descriptive alias for version and help messages. */
+  def cmdDesc = "compiler"
 
   private def explainAdvanced = "\n" + """
     |-- Notes on option parsing --
     |Boolean settings are always false unless set.
     |Where multiple values are accepted, they should be comma-separated.
-    |  example: -Xplugin:plugin1,plugin2
+    |  example: -Xplugin:option1,option2
     |<phases> means one or a comma-separated list of:
     |  (partial) phase names, phase ids, phase id ranges, or the string "all".
     |  example: -Xprint:all prints all phases.
@@ -80,23 +83,35 @@ class CompilerCommand(arguments: List[String], val settings: Settings) {
   def xusageMsg   = createUsageMsg("Possible advanced", shouldExplain = true, _.isAdvanced)
   def yusageMsg   = createUsageMsg("Possible private", shouldExplain = true, _.isPrivate)
 
-  // If any of these settings is set, the compiler shouldn't start;
-  // an informative message of some sort should be printed instead.
-  def shouldStopWithInfo = {
-    import settings.{ Setting => _, _ }
-    Set[BooleanSetting](help, Xhelp, Yhelp, showPlugins, showPhases) exists (_.value)
-  }
+  /** For info settings, compiler should just print a message and quit. */
+  def shouldStopWithInfo = settings.isInfo
 
   def getInfoMessage(global: Global): String = {
     import settings._
-    if (help.value)               usageMsg + global.pluginOptionsHelp
-    else if (Xhelp.value)         xusageMsg
-    else if (Yhelp.value)         yusageMsg
-    else if (showPlugins.value)   global.pluginDescriptions
-    else if (showPhases.value)    global.phaseDescriptions + (
-      if (debug.value) "\n" + global.phaseFlagDescriptions else ""
+    import Properties.{ versionString, copyrightString } //versionFor
+    def versionFor(command: String) = f"Scala $command $versionString -- $copyrightString"
+
+    if (version)            versionFor(cmdDesc)
+    else if (help)          usageMsg + global.pluginOptionsHelp
+    else if (Xhelp)         xusageMsg
+    else if (Yhelp)         yusageMsg
+    else if (showPlugins)   global.pluginDescriptions
+    else if (showPhases)    global.phaseDescriptions + (
+      if (debug) "\n" + global.phaseFlagDescriptions else ""
     )
-    else                          ""
+    else if (genPhaseGraph.isSetByUser) {
+      val components = global.phaseNames  // global.phaseDescriptors // one initializes
+      s"Phase graph of ${components.size} components output to ${genPhaseGraph.value}*.dot."
+    }
+    // would be nicer if we could ask all the options for their helpful messages
+    else {
+      val sb = new StringBuilder
+      allSettings foreach {
+        case s: MultiChoiceSetting[_] if s.isHelping => sb append s.help
+        case _ =>
+      }
+      sb.toString
+    }
   }
 
   /**

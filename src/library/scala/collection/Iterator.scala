@@ -165,11 +165,11 @@ object Iterator {
   /** Avoid stack overflows when applying ++ to lots of iterators by
    *  flattening the unevaluated iterators out into a vector of closures.
    */
-  private[scala] final class ConcatIterator[+A](initial: Vector[() => Iterator[A]]) extends Iterator[A] {
-    // current set to null when all iterators are exhausted
-    private[this] var current: Iterator[A] = Iterator.empty
+  private[scala] final class ConcatIterator[+A](private[this] var current: Iterator[A], initial: Vector[() => Iterator[A]]) extends Iterator[A] {
+    @deprecated def this(initial: Vector[() => Iterator[A]]) = this(Iterator.empty, initial) // for binary compatibility
     private[this] var queue: Vector[() => Iterator[A]] = initial
     // Advance current to the next non-empty iterator
+    // current is set to null when all iterators are exhausted
     private[this] def advance(): Boolean = {
       if (queue.isEmpty) {
         current = null
@@ -185,7 +185,7 @@ object Iterator {
     def next()  = if (hasNext) current.next else Iterator.empty.next
 
     override def ++[B >: A](that: => GenTraversableOnce[B]): Iterator[B] =
-      new ConcatIterator(queue :+ (() => that.toIterator))
+      new ConcatIterator(current, queue :+ (() => that.toIterator))
   }
 
   private[scala] final class JoinIterator[+A](lhs: Iterator[A], that: => GenTraversableOnce[A]) extends Iterator[A] {
@@ -194,7 +194,7 @@ object Iterator {
     def next    = if (lhs.hasNext) lhs.next else rhs.next
 
     override def ++[B >: A](that: => GenTraversableOnce[B]) =
-      new ConcatIterator(Vector(() => this, () => that.toIterator))
+      new ConcatIterator(this, Vector(() => that.toIterator))
   }
 }
 
@@ -922,11 +922,16 @@ trait Iterator[+A] extends TraversableOnce[A] {
     /** For reasons which remain to be determined, calling
      *  self.take(n).toSeq cause an infinite loop, so we have
      *  a slight variation on take for local usage.
+     *  NB: self.take.toSeq is slice.toStream, lazily built on self,
+     *  so a subsequent self.hasNext would not test self after the
+     *  group was consumed.
      */
     private def takeDestructively(size: Int): Seq[A] = {
       val buf = new ArrayBuffer[A]
       var i = 0
-      while (self.hasNext && i < size) {
+      // The order of terms in the following condition is important
+      // here as self.hasNext could be blocking
+      while (i < size && self.hasNext) {
         buf += self.next
         i += 1
       }
@@ -943,12 +948,10 @@ trait Iterator[+A] extends TraversableOnce[A] {
       // so the rest of the code can be oblivious
       val xs: Seq[B] = {
         val res = takeDestructively(count)
-        // extra checks so we don't calculate length unless there's reason
-        if (pad.isDefined && !self.hasNext) {
-          val shortBy = count - res.length
-          if (shortBy > 0) res ++ padding(shortBy) else res
-        }
-        else res
+        // was: extra checks so we don't calculate length unless there's reason
+        // but since we took the group eagerly, just use the fast length
+        val shortBy = count - res.length
+        if (shortBy > 0 && pad.isDefined) res ++ padding(shortBy) else res
       }
       lazy val len = xs.length
       lazy val incomplete = len < count
@@ -1085,6 +1088,9 @@ trait Iterator[+A] extends TraversableOnce[A] {
   }
 
   /** Returns this iterator with patched values.
+   *  Patching at negative indices is the same as patching starting at 0.
+   *  Patching at indices at or larger than the length of the original iterator appends the patch to the end.
+   *  If more values are replaced than actually exist, the excess is ignored.
    *
    *  @param from       The start index from which to patch
    *  @param patchElems The iterator of patch values
@@ -1093,18 +1099,33 @@ trait Iterator[+A] extends TraversableOnce[A] {
    */
   def patch[B >: A](from: Int, patchElems: Iterator[B], replaced: Int): Iterator[B] = new AbstractIterator[B] {
     private var origElems = self
-    private var i = 0
-    def hasNext: Boolean =
-      if (i < from) origElems.hasNext
-      else patchElems.hasNext || origElems.hasNext
+    private var i = (if (from > 0) from else 0)  // Counts down, switch to patch on 0, -1 means use patch first
+    def hasNext: Boolean = {
+      if (i == 0) {
+        origElems = origElems drop replaced
+        i = -1
+      }
+      origElems.hasNext || patchElems.hasNext
+    }
     def next(): B = {
-      // We have to do this *first* just in case from = 0.
-      if (i == from) origElems = origElems drop replaced
-      val result: B =
-        if (i < from || !patchElems.hasNext) origElems.next()
-        else patchElems.next()
-      i += 1
-      result
+      if (i == 0) {
+        origElems = origElems drop replaced
+        i = -1
+      }
+      if (i < 0) {
+        if (patchElems.hasNext) patchElems.next()
+        else origElems.next()
+      }
+      else {
+        if (origElems.hasNext) {
+          i -= 1
+          origElems.next()
+        }
+        else {
+          i = -1
+          patchElems.next()
+        }
+      }
     }
   }
 
@@ -1171,4 +1192,4 @@ trait Iterator[+A] extends TraversableOnce[A] {
 }
 
 /** Explicit instantiation of the `Iterator` trait to reduce class file size in subclasses. */
-private[scala] abstract class AbstractIterator[+A] extends Iterator[A]
+abstract class AbstractIterator[+A] extends Iterator[A]

@@ -1,4 +1,4 @@
-import scala.reflect.macros.Context
+import scala.reflect.macros.whitebox.Context
 import language.experimental.macros
 
 case class C[T](t: String)
@@ -9,6 +9,7 @@ object C {
 object Macros {
   def impl[T](c: Context)(ttag: c.WeakTypeTag[T]) = {
     import c.universe._
+    import internal._
     val ttag0 = ttag;
     {
       // When we're expanding implicitly[C[Nothing]], the type inferencer will see
@@ -43,10 +44,10 @@ object Macros {
       implicit def ttag: WeakTypeTag[T] = {
         val tpe = ttag0.tpe
         val sym = tpe.typeSymbol.asType
-        if (sym.isParameter && !sym.isSkolem) TypeTag.Nothing.asInstanceOf[TypeTag[T]]
+        if (sym.isParameter && !isSkolem(sym)) TypeTag.Nothing.asInstanceOf[TypeTag[T]]
         else ttag0
       }
-      reify(C[T](c.literal(weakTypeOf[T].toString).splice))
+      reify(C[T](c.Expr[String](Literal(Constant(weakTypeOf[T].toString))).splice))
     }
   }
 }

@@ -130,7 +130,7 @@ abstract class ICodeReader extends ClassfileParser {
     log("ICodeReader reading " + cls)
     val name = cls.javaClassName
 
-    classPath.findSourceFile(name) match {
+    classPath.findClassFile(name) match {
       case Some(classFile) => parse(classFile, cls)
       case _               => MissingRequirementError.notFound("Could not find bytecode for " + cls)
     }
@@ -575,23 +575,28 @@ abstract class ICodeReader extends ClassfileParser {
         case JVM.invokevirtual =>
           val m = pool.getMemberSymbol(u2, static = false); size += 2
           code.emit(CALL_METHOD(m, Dynamic))
+          method.updateRecursive(m)
         case JVM.invokeinterface  =>
           val m = pool.getMemberSymbol(u2, static = false); size += 4
           in.skip(2)
           code.emit(CALL_METHOD(m, Dynamic))
+          // invokeinterface can't be recursive
         case JVM.invokespecial   =>
           val m = pool.getMemberSymbol(u2, static = false); size += 2
           val style = if (m.name == nme.CONSTRUCTOR || m.isPrivate) Static(onInstance = true)
                       else SuperCall(m.owner.name)
           code.emit(CALL_METHOD(m, style))
+          method.updateRecursive(m)
         case JVM.invokestatic    =>
           val m = pool.getMemberSymbol(u2, static = true); size += 2
           if (isBox(m))
             code.emit(BOX(toTypeKind(m.info.paramTypes.head)))
           else if (isUnbox(m))
             code.emit(UNBOX(toTypeKind(m.info.resultType)))
-          else
+          else {
             code.emit(CALL_METHOD(m, Static(onInstance = false)))
+            method.updateRecursive(m)
+          }
         case JVM.invokedynamic  =>
           // TODO, this is just a place holder. A real implementation must parse the class constant entry
           debuglog("Found JVM invokedynamic instructionm, inserting place holder ICode INVOKE_DYNAMIC.")
@@ -775,32 +780,40 @@ abstract class ICodeReader extends ClassfileParser {
           bb = otherBlock
 //          Console.println("\t> entering bb: " + bb)
         }
-        instr match {
-          case LJUMP(target) =>
-            otherBlock = blocks(target)
-            bb.emitOnly(JUMP(otherBlock))
 
-          case LCJUMP(success, failure, cond, kind) =>
-            otherBlock = blocks(success)
-            val failBlock = blocks(failure)
-            bb.emitOnly(CJUMP(otherBlock, failBlock, cond, kind))
+        if (bb.closed) {
+          // the basic block is closed, i.e. the previous instruction was a jump, return or throw,
+          // but the next instruction is not a jump target. this means that the next instruction is
+          // dead code. we can therefore advance until the next jump target.
+          debuglog(s"ICode reader skipping dead instruction $instr in classfile $instanceCode")
+        } else {
+          instr match {
+            case LJUMP(target) =>
+              otherBlock = blocks(target)
+              bb.emitOnly(JUMP(otherBlock))
 
-          case LCZJUMP(success, failure, cond, kind) =>
-            otherBlock = blocks(success)
-            val failBlock = blocks(failure)
-            bb.emitOnly(CZJUMP(otherBlock, failBlock, cond, kind))
+            case LCJUMP(success, failure, cond, kind) =>
+              otherBlock = blocks(success)
+              val failBlock = blocks(failure)
+              bb.emitOnly(CJUMP(otherBlock, failBlock, cond, kind))
 
-          case LSWITCH(tags, targets) =>
-            bb.emitOnly(SWITCH(tags, targets map blocks))
+            case LCZJUMP(success, failure, cond, kind) =>
+              otherBlock = blocks(success)
+              val failBlock = blocks(failure)
+              bb.emitOnly(CZJUMP(otherBlock, failBlock, cond, kind))
 
-          case RETURN(_) =>
-            bb emitOnly instr
+            case LSWITCH(tags, targets) =>
+              bb.emitOnly(SWITCH(tags, targets map blocks))
 
-          case THROW(clasz) =>
-            bb emitOnly instr
+            case RETURN(_) =>
+              bb emitOnly instr
 
-          case _ =>
-            bb emit instr
+            case THROW(clasz) =>
+              bb emitOnly instr
+
+            case _ =>
+              bb emit instr
+          }
         }
       }
 

@@ -9,7 +9,7 @@ package doc
 import scala.tools.nsc.ast.parser.{ SyntaxAnalyzer, BracePatch }
 import typechecker.Analyzer
 import scala.reflect.internal.Chars._
-import scala.reflect.internal.util.{ BatchSourceFile, RangePosition }
+import scala.reflect.internal.util.{ BatchSourceFile, Position }
 import scala.tools.nsc.doc.base.{ CommentFactoryBase, MemberLookupBase, LinkTo, LinkToExternal }
 
 trait ScaladocAnalyzer extends Analyzer {
@@ -37,14 +37,14 @@ trait ScaladocAnalyzer extends Analyzer {
         comment.defineVariables(sym)
         val typer1 = newTyper(context.makeNewScope(docDef, context.owner))
         for (useCase <- comment.useCases) {
-          typer1.silent(_ => typer1 defineUseCases useCase) match {
+          typer1.silent(_.asInstanceOf[ScaladocTyper].defineUseCases(useCase)) match {
             case SilentTypeError(err) =>
-              unit.warning(useCase.pos, err.errMsg)
+              reporter.warning(useCase.pos, err.errMsg)
             case _ =>
           }
           for (useCaseSym <- useCase.defined) {
             if (sym.name != useCaseSym.name)
-              unit.warning(useCase.pos, "@usecase " + useCaseSym.name.decode + " does not match commented symbol: " + sym.name.decode)
+              reporter.warning(useCase.pos, "@usecase " + useCaseSym.name.decode + " does not match commented symbol: " + sym.name.decode)
           }
         }
       }
@@ -56,7 +56,7 @@ trait ScaladocAnalyzer extends Analyzer {
       def stringParser(str: String): syntaxAnalyzer.Parser = {
         val file = new BatchSourceFile(context.unit.source.file, str) {
           override def positionInUltimateSource(pos: Position) = {
-            pos.withSource(context.unit.source, useCase.pos.start)
+            pos withSource context.unit.source withShift useCase.pos.start
           }
         }
         newUnitParser(new CompilationUnit(file))
@@ -190,8 +190,8 @@ abstract class ScaladocSyntaxAnalyzer[G <: Global](val global: G) extends Syntax
         typeParams.nonEmpty || version.nonEmpty || since.nonEmpty
       }
       def isDirty = unclean(unmooredParser parseComment doc)
-      if ((doc ne null) && (settings.lint || isDirty))
-        unit.warning(doc.pos, "discarding unmoored doc comment")
+      if ((doc ne null) && (settings.warnDocDetached || isDirty))
+        reporter.warning(doc.pos, "discarding unmoored doc comment")
     }
 
     override def flushDoc(): DocComment = (try lastDoc finally lastDoc = null)
@@ -208,7 +208,7 @@ abstract class ScaladocSyntaxAnalyzer[G <: Global](val global: G) extends Syntax
       super.skipDocComment()
     }
     override def skipBlockComment(): Unit = {
-      inDocComment = false
+      inDocComment = false // ??? this means docBuffer won't receive contents of this comment???
       docBuffer = new StringBuilder("/*")
       super.skipBlockComment()
     }
@@ -216,10 +216,11 @@ abstract class ScaladocSyntaxAnalyzer[G <: Global](val global: G) extends Syntax
       // emit a block comment; if it's double-star, make Doc at this pos
       def foundStarComment(start: Int, end: Int) = try {
         val str = docBuffer.toString
-        val pos = new RangePosition(unit.source, start, start, end)
-        unit.comment(pos, str)
-        if (inDocComment)
+        val pos = Position.range(unit.source, start, start, end)
+        if (inDocComment) {
+          signalParsedDocComment(str, pos)
           lastDoc = DocComment(str, pos)
+        }
         true
       } finally {
         docBuffer    = null
@@ -240,7 +241,7 @@ abstract class ScaladocSyntaxAnalyzer[G <: Global](val global: G) extends Syntax
           t =>
             DocDef(doc, t) setPos {
               if (t.pos.isDefined) {
-                val pos = doc.pos.withEnd(t.pos.endOrPoint)
+                val pos = doc.pos.withEnd(t.pos.end)
                 // always make the position transparent
                 pos.makeTransparent
               } else {

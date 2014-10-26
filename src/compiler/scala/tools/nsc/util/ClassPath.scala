@@ -26,6 +26,8 @@ import scala.reflect.runtime.ReflectionUtils
  *  @author Stepan Koltsov
  */
 object ClassPath {
+  import scala.language.postfixOps
+
   /** Expand single path entry */
   private def expandS(pattern: String): List[String] = {
     val wildSuffix = File.separator + "*"
@@ -80,9 +82,6 @@ object ClassPath {
     )
   }
 
-  /** A useful name filter. */
-  def isTraitImplementation(name: String) = ReflectionUtils.isTraitImplementation(name)
-
   def specToURL(spec: String): Option[URL] =
     try Some(new URL(spec))
     catch { case _: MalformedURLException => None }
@@ -95,6 +94,12 @@ object ClassPath {
      *  based on their name.
      */
     def isValidName(name: String): Boolean = true
+
+    /** Filters for assessing validity of various entities.
+     */
+    def validClassFile(name: String)  = endsClass(name) && isValidName(name)
+    def validPackage(name: String)    = (name != "META-INF") && (name != "") && (name.charAt(0) != '.')
+    def validSourceFile(name: String) = endsScala(name) || endsJava(name)
 
     /** From the representation to its identifier.
      */
@@ -139,9 +144,7 @@ object ClassPath {
     def newClassPath(dir: AbstractFile) = new DirectoryClassPath(dir, this)
   }
 
-  object DefaultJavaContext extends JavaContext {
-    override def isValidName(name: String) = !ReflectionUtils.scalacShouldntLoadClassfile(name)
-  }
+  object DefaultJavaContext extends JavaContext
 
   private def endsClass(s: String) = s.length > 6 && s.substring(s.length - 6) == ".class"
   private def endsScala(s: String) = s.length > 6 && s.substring(s.length - 6) == ".scala"
@@ -208,9 +211,9 @@ abstract class ClassPath[T] {
 
   /** Filters for assessing validity of various entities.
    */
-  def validClassFile(name: String)  = endsClass(name) && context.isValidName(name)
-  def validPackage(name: String)    = (name != "META-INF") && (name != "") && (name.charAt(0) != '.')
-  def validSourceFile(name: String) = endsScala(name) || endsJava(name)
+  def validClassFile(name: String)  = context.validClassFile(name)
+  def validPackage(name: String)    = context.validPackage(name)
+  def validSourceFile(name: String) = context.validSourceFile(name)
 
   /**
    * Find a ClassRep given a class name of the form "package.subpackage.ClassName".
@@ -228,7 +231,7 @@ abstract class ClassPath[T] {
         classes find (_.name == name)
     }
 
-  def findSourceFile(name: String): Option[AbstractFile] =
+  def findClassFile(name: String): Option[AbstractFile] =
     findClass(name) match {
       case Some(ClassRep(Some(x: AbstractFile), _)) => Some(x)
       case _                                        => None

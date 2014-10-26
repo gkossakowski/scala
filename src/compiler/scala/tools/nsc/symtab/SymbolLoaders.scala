@@ -164,9 +164,16 @@ abstract class SymbolLoaders {
         if (settings.verbose) inform("[symloader] no class, picked up source file for " + src.path)
         enterToplevelsFromSource(owner, classRep.name, src)
       case (Some(bin), _) =>
-        enterClassAndModule(owner, classRep.name, new ClassfileLoader(bin))
+        enterClassAndModule(owner, classRep.name, newClassLoader(bin))
     }
   }
+
+  /** Create a new loader from a binary classfile.
+   *  This is intented as a hook allowing to support loading symbols from
+   *  files other than .class files.
+   */
+  protected def newClassLoader(bin: AbstractFile): SymbolLoader =
+    new ClassfileLoader(bin)
 
   /**
    * A lazy type that completes itself by calling parameter doComplete.
@@ -233,6 +240,12 @@ abstract class SymbolLoaders {
     }
   }
 
+  private def phaseBeforeRefchecks: Phase = {
+    var resPhase = phase
+    while (resPhase.refChecked) resPhase = resPhase.prev
+    resPhase
+  }
+
   /**
    * Load contents of a package
    */
@@ -241,19 +254,24 @@ abstract class SymbolLoaders {
 
     protected def doComplete(root: Symbol) {
       assert(root.isPackageClass, root)
-      root.setInfo(new PackageClassInfoType(newScope, root))
+      // Time travel to a phase before refchecks avoids an initialization issue. `openPackageModule`
+      // creates a module symbol and invokes invokes `companionModule` while the `infos` field is
+      // still null. This calls `isModuleNotMethod`, which forces the `info` if run after refchecks.
+      enteringPhase(phaseBeforeRefchecks) {
+        root.setInfo(new PackageClassInfoType(newScope, root))
 
-      if (!root.isRoot) {
-        for (classRep <- classpath.classes if platform.doLoad(classRep)) {
-          initializeFromClassPath(root, classRep)
+        if (!root.isRoot) {
+          for (classRep <- classpath.classes) {
+            initializeFromClassPath(root, classRep)
+          }
         }
-      }
-      if (!root.isEmptyPackageClass) {
-        for (pkg <- classpath.packages) {
-          enterPackage(root, pkg.name, new PackageLoader(pkg))
-        }
+        if (!root.isEmptyPackageClass) {
+          for (pkg <- classpath.packages) {
+            enterPackage(root, pkg.name, new PackageLoader(pkg))
+          }
 
-        openPackageModule(root)
+          openPackageModule(root)
+        }
       }
     }
   }
@@ -283,7 +301,13 @@ abstract class SymbolLoaders {
 
     protected def doComplete(root: Symbol) {
       val start = if (Statistics.canEnable) Statistics.startTimer(classReadNanos) else null
-      classfileParser.parse(classfile, root)
+
+      // Running the classfile parser after refchecks can lead to "illegal class file dependency"
+      // errors. More concretely, the classfile parser calls "sym.companionModule", which calls
+      // "isModuleNotMethod" on the companion. After refchecks, this method forces the info, which
+      // may run the classfile parser. This produces the error.
+      enteringPhase(phaseBeforeRefchecks)(classfileParser.parse(classfile, root))
+
       if (root.associatedFile eq NoAbstractFile) {
         root match {
           // In fact, the ModuleSymbol forwards its setter to the module class

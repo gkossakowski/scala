@@ -162,7 +162,7 @@ trait NamesDefaults { self: Analyzer =>
 
       // never used for constructor calls, they always have a stable qualifier
       def blockWithQualifier(qual: Tree, selected: Name) = {
-        val sym = blockTyper.context.owner.newValue(unit.freshTermName("qual$"), qual.pos, newFlags = ARTIFACT) setInfo uncheckedBounds(qual.tpe)
+        val sym = blockTyper.context.owner.newValue(unit.freshTermName(nme.QUAL_PREFIX), newFlags = ARTIFACT) setInfo uncheckedBounds(qual.tpe) setPos (qual.pos.makeTransparent)
         blockTyper.context.scope enter sym
         val vd = atPos(sym.pos)(ValDef(sym, qual) setType NoType)
         // it stays in Vegas: SI-5720, SI-5727
@@ -173,13 +173,16 @@ trait NamesDefaults { self: Analyzer =>
           // setSymbol below is important because the 'selected' function might be overloaded. by
           // assigning the correct method symbol, typedSelect will just assign the type. the reason
           // to still call 'typed' is to correctly infer singleton types, SI-5259.
-          val f = blockTyper.typedOperator(Select(newQual, selected).setSymbol(baseFun1.symbol))
+          val selectPos =
+            if(qual.pos.isRange && baseFun1.pos.isRange) qual.pos.union(baseFun1.pos).withStart(Math.min(qual.pos.end, baseFun1.pos.end))
+            else baseFun1.pos
+          val f = blockTyper.typedOperator(Select(newQual, selected).setSymbol(baseFun1.symbol).setPos(selectPos))
           if (funTargs.isEmpty) f
           else TypeApply(f, funTargs).setType(baseFun.tpe)
         }
 
         val b = Block(List(vd), baseFunTransformed)
-                  .setType(baseFunTransformed.tpe).setPos(baseFun.pos)
+                  .setType(baseFunTransformed.tpe).setPos(baseFun.pos.makeTransparent)
         context.namedApplyBlockInfo =
           Some((b, NamedApplyInfo(Some(newQual), defaultTargs, Nil, blockTyper)))
         b
@@ -284,12 +287,12 @@ trait NamesDefaults { self: Analyzer =>
             }
             else {
               // TODO In 83c9c764b, we tried to a stable type here to fix SI-7234. But the resulting TypeTree over a
-              //      singleton type without an original TypeTree fails to retypecheck after a resetLocalAttrs (SI-7516),
+              //      singleton type without an original TypeTree fails to retypecheck after a resetAttrs (SI-7516),
               //      which is important for (at least) macros.
               arg.tpe
             }
           ).widen // have to widen or types inferred from literal defaults will be singletons
-          val s = context.owner.newValue(unit.freshTermName("x$"), arg.pos, newFlags = ARTIFACT) setInfo {
+          val s = context.owner.newValue(unit.freshTermName(nme.NAMEDARG_PREFIX), arg.pos, newFlags = ARTIFACT) setInfo {
             val tp = if (byName) functionType(Nil, argTpe) else argTpe
             uncheckedBounds(tp)
           }
@@ -307,7 +310,7 @@ trait NamesDefaults { self: Analyzer =>
               new ChangeOwnerTraverser(context.owner, sym) traverse arg // fixes #4502
               if (repeated) arg match {
                 case WildcardStarArg(expr) => expr
-                case _                     => blockTyper typed gen.mkSeqApply(resetLocalAttrs(arg))
+                case _                     => blockTyper typed gen.mkSeqApply(resetAttrs(arg))
               } else arg
             }
           Some(atPos(body.pos)(ValDef(sym, body).setType(NoType)))
@@ -376,18 +379,37 @@ trait NamesDefaults { self: Analyzer =>
 
   def makeNamedTypes(syms: List[Symbol]) = syms map (sym => NamedType(sym.name, sym.tpe))
 
-  def missingParams[T](args: List[T], params: List[Symbol], argName: T => Option[Name] = nameOfNamedArg _): (List[Symbol], Boolean) = {
-    val namedArgs = args.dropWhile(arg => {
-      val n = argName(arg)
-      n.isEmpty || params.forall(p => p.name != n.get)
-    })
-    val namedParams = params.drop(args.length - namedArgs.length)
-    // missing: keep those with a name which doesn't exist in namedArgs
-    val missingParams = namedParams.filter(p => namedArgs.forall(arg => {
+  /**
+   * Returns the parameter symbols of an invocation expression that are not defined by the list
+   * of arguments.
+   *
+   * @param args    The list of arguments
+   * @param params  The list of parameter sybols of the invoked method
+   * @param argName A function that extracts the name of an argument expression, if it is a named argument.
+   */
+  def missingParams[T](args: List[T], params: List[Symbol], argName: T => Option[Name]): (List[Symbol], Boolean) = {
+    // The argument list contains first a mix of positional args and named args that are on the
+    // right parameter position, and then a number or named args on different positions.
+
+    // collect all named arguments whose position does not match the parameter they define
+    val namedArgsOnChangedPosition = args.zip(params) dropWhile {
+      case (arg, param) =>
+        val n = argName(arg)
+        // drop the argument if
+        //  - it's not named, or
+        //  - it's named, but defines the parameter on its current position, or
+        //  - it's named, but none of the parameter names matches (treated as a positional argument, an assignment expression)
+        n.isEmpty || n.get == param.name || params.forall(_.name != n.get)
+    } map (_._1)
+
+    val paramsWithoutPositionalArg = params.drop(args.length - namedArgsOnChangedPosition.length)
+
+    // missing parameters: those with a name which is not specified in one of the namedArgsOnChangedPosition
+    val missingParams = paramsWithoutPositionalArg.filter(p => namedArgsOnChangedPosition.forall { arg =>
       val n = argName(arg)
       n.isEmpty || n.get != p.name
-    }))
-    val allPositional = missingParams.length == namedParams.length
+    })
+    val allPositional = missingParams.length == paramsWithoutPositionalArg.length
     (missingParams, allPositional)
   }
 
@@ -404,7 +426,7 @@ trait NamesDefaults { self: Analyzer =>
                   previousArgss: List[List[Tree]], params: List[Symbol],
                   pos: scala.reflect.internal.util.Position, context: Context): (List[Tree], List[Symbol]) = {
     if (givenArgs.length < params.length) {
-      val (missing, positional) = missingParams(givenArgs, params)
+      val (missing, positional) = missingParams(givenArgs, params, nameOfNamedArg)
       if (missing forall (_.hasDefault)) {
         val defaultArgs = missing flatMap (p => {
           val defGetter = defaultGetter(p, context)
@@ -533,8 +555,8 @@ trait NamesDefaults { self: Analyzer =>
           def matchesName(param: Symbol) = !param.isSynthetic && (
             (param.name == name) || (param.deprecatedParamName match {
               case Some(`name`) =>
-                context0.unit.deprecationWarning(arg.pos,
-                  "the parameter name "+ name +" has been deprecated. Use "+ param.name +" instead.")
+                context0.deprecationWarning(arg.pos, param,
+                  s"the parameter name $name has been deprecated. Use ${param.name} instead.")
                 true
               case _ => false
             })

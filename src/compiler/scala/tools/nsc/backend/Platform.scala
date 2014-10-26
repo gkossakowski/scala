@@ -15,10 +15,6 @@ trait Platform {
   val symbolTable: symtab.SymbolTable
   import symbolTable._
 
-  /** The binary classfile representation type */
-  @deprecated("BinaryRepr is not an abstract type anymore. It's an alias that points at AbstractFile. It'll be removed before Scala 2.11 is released.", "2.11.0-M5")
-  type BinaryRepr = AbstractFile
-
   /** The compiler classpath. */
   def classPath: ClassPath[AbstractFile]
 
@@ -33,14 +29,6 @@ trait Platform {
 
   /** The various ways a boxed primitive might materialize at runtime. */
   def isMaybeBoxed(sym: Symbol): Boolean
-
-  /**
-   * Tells whether a class should be loaded and entered into the package
-   * scope. On .NET, this method returns `false` for all synthetic classes
-   * (anonymous classes, implementation classes, module classes), their
-   * symtab is encoded in the pickle of another class.
-   */
-  def doLoad(cls: ClassPath[AbstractFile]#ClassRep): Boolean
 
   /**
    * Tells whether a class with both a binary and a source representation

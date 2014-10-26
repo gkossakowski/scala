@@ -9,10 +9,10 @@ package reporters
 
 import java.io.{ BufferedReader, IOException, PrintWriter }
 import scala.reflect.internal.util._
+import StringOps._
 
 /**
- * This class implements a Reporter that displays messages on a text
- * console.
+ * This class implements a Reporter that displays messages on a text console.
  */
 class ConsoleReporter(val settings: Settings, reader: BufferedReader, writer: PrintWriter) extends AbstractReporter {
   def this(settings: Settings) = this(settings, Console.in, new PrintWriter(Console.err, true))
@@ -29,7 +29,7 @@ class ConsoleReporter(val settings: Settings, reader: BufferedReader, writer: Pr
     case INFO    => null
   }
 
-  private def clabel(severity: Severity): String = {
+  protected def clabel(severity: Severity): String = {
     val label0 = label(severity)
     if (label0 eq null) "" else label0 + ": "
   }
@@ -40,7 +40,10 @@ class ConsoleReporter(val settings: Settings, reader: BufferedReader, writer: Pr
     StringOps.countElementsAsString((severity).count, label(severity))
 
   /** Prints the message. */
-  def printMessage(msg: String) { writer.print(msg + "\n"); writer.flush() }
+  def printMessage(msg: String) {
+    writer print trimAllTrailingSpace(msg) + "\n"
+    writer.flush()
+  }
 
   /** Prints the message with the given position indication. */
   def printMessage(posIn: Position, msg: String) {
@@ -48,11 +51,6 @@ class ConsoleReporter(val settings: Settings, reader: BufferedReader, writer: Pr
   }
   def print(pos: Position, msg: String, severity: Severity) {
     printMessage(pos, clabel(severity) + msg)
-  }
-
-  def printSourceLine(pos: Position) {
-    printMessage(pos.lineContent.stripLineEnd)
-    printColumnMarker(pos)
   }
 
   /** Prints the column marker of the given position.

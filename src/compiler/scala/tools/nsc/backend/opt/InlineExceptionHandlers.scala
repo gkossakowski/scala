@@ -5,6 +5,8 @@
 package scala.tools.nsc
 package backend.opt
 
+import java.util.concurrent.TimeUnit
+
 /**
   * This optimization phase inlines the exception handlers so that further phases can optimize the code better
   *
@@ -57,6 +59,8 @@ abstract class InlineExceptionHandlers extends SubComponent {
   /** Create a new phase */
   override def newPhase(p: Phase) = new InlineExceptionHandlersPhase(p)
 
+  override def enabled = settings.inlineHandlers
+
   /**
     * Inlining Exception Handlers
     */
@@ -89,12 +93,12 @@ abstract class InlineExceptionHandlers extends SubComponent {
     /** Apply exception handler inlining to a class */
     override def apply(c: IClass): Unit =
       if (settings.inlineHandlers) {
-        val startTime = System.currentTimeMillis
+        val startTime = System.nanoTime()
         currentClass = c
 
         debuglog("Starting InlineExceptionHandlers on " + c)
         c.methods foreach applyMethod
-        debuglog("Finished InlineExceptionHandlers on " + c + "... " + (System.currentTimeMillis - startTime) + "ms")
+        debuglog("Finished InlineExceptionHandlers on " + c + "... " + TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTime) + "ms")
         currentClass = null
       }
 
@@ -178,7 +182,7 @@ abstract class InlineExceptionHandlers extends SubComponent {
             // in other words: what's on the stack MUST conform to what's in the THROW(..)!
 
             if (!canReplaceHandler) {
-              currentClass.cunit.warning(NoPosition, "Unable to inline the exception handler inside incorrect" +
+              reporter.warning(NoPosition, "Unable to inline the exception handler inside incorrect" +
                 " block:\n" + bblock.iterator.mkString("\n") + "\nwith stack: " + typeInfo + " just " +
                 "before instruction index " + index)
             }
@@ -379,7 +383,7 @@ abstract class InlineExceptionHandlers extends SubComponent {
           Some((exceptionLocal, copy))
 
         case _ =>
-          currentClass.cunit.warning(NoPosition, "Unable to inline the exception handler due to incorrect format:\n" +
+          reporter.warning(NoPosition, "Unable to inline the exception handler due to incorrect format:\n" +
             handler.iterator.mkString("\n"))
           None
       }

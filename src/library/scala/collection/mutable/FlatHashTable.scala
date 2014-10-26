@@ -107,7 +107,8 @@ trait FlatHashTable[A] extends FlatHashTable.HashUtils[A] {
   }
 
   /** Finds an entry in the hash table if such an element exists. */
-  protected def findEntry(elem: A): Option[A] = 
+  @deprecatedOverriding("Internal implementation does not admit sensible overriding of this method.", "2.11.0")
+  protected def findEntry(elem: A): Option[A] =
     findElemImpl(elem) match {
       case null => None
       case entry => Some(entryToElem(entry))
@@ -115,6 +116,7 @@ trait FlatHashTable[A] extends FlatHashTable.HashUtils[A] {
 
 
   /** Checks whether an element is contained in the hash table. */
+  @deprecatedOverriding("Internal implementation does not admit sensible overriding of this method.", "2.11.0")
   protected def containsElem(elem: A): Boolean = {
     null != findElemImpl(elem)
   }
@@ -136,10 +138,10 @@ trait FlatHashTable[A] extends FlatHashTable.HashUtils[A] {
   protected def addElem(elem: A) : Boolean = {
     addEntry(elemToEntry(elem))
   }
-  
+
   /**
    * Add an entry (an elem converted to an entry via elemToEntry) if not yet in
-   * table. 
+   * table.
    *  @return Returns `true` if a new elem was added, `false` otherwise.
    */
   protected def addEntry(newEntry : AnyRef) : Boolean = {
@@ -156,10 +158,10 @@ trait FlatHashTable[A] extends FlatHashTable.HashUtils[A] {
     nnSizeMapAdd(h)
     if (tableSize >= threshold) growTable()
     true
-    
+
   }
 
-  /** 
+  /**
    * Removes an elem from the hash table returning true if the element was found (and thus removed)
    * or false if it didn't exist.
    */
@@ -231,7 +233,7 @@ trait FlatHashTable[A] extends FlatHashTable.HashUtils[A] {
       if (table(i) != null && !containsElem(entryToElem(table(i))))
         assert(assertion = false, i+" "+table(i)+" "+table.mkString)
   }
- 
+
 
   /* Size map handling code */
 
@@ -248,15 +250,18 @@ trait FlatHashTable[A] extends FlatHashTable.HashUtils[A] {
    * where sizeMapBucketSize == 4.
    *
    */
+  @deprecatedOverriding("Internal implementation does not admit sensible overriding of this method.", "2.11.0")
   protected def nnSizeMapAdd(h: Int) = if (sizemap ne null) {
     val p = h >> sizeMapBucketBitSize
     sizemap(p) += 1
   }
 
+  @deprecatedOverriding("Internal implementation does not admit sensible overriding of this method.", "2.11.0")
   protected def nnSizeMapRemove(h: Int) = if (sizemap ne null) {
     sizemap(h >> sizeMapBucketBitSize) -= 1
   }
 
+  @deprecatedOverriding("Internal implementation does not admit sensible overriding of this method.", "2.11.0")
   protected def nnSizeMapReset(tableLength: Int) = if (sizemap ne null) {
     val nsize = calcSizeMapSize(tableLength)
     if (sizemap.length != nsize) sizemap = new Array[Int](nsize)
@@ -265,14 +270,17 @@ trait FlatHashTable[A] extends FlatHashTable.HashUtils[A] {
 
   private[collection] final def totalSizeMapBuckets = (table.length - 1) / sizeMapBucketSize + 1
 
+  @deprecatedOverriding("Internal implementation does not admit sensible overriding of this method.", "2.11.0")
   protected def calcSizeMapSize(tableLength: Int) = (tableLength >> sizeMapBucketBitSize) + 1
 
   // discards the previous sizemap and only allocates a new one
+  @deprecatedOverriding("Internal implementation does not admit sensible overriding of this method.", "2.11.0")
   protected def sizeMapInit(tableLength: Int) {
     sizemap = new Array[Int](calcSizeMapSize(tableLength))
   }
 
   // discards the previous sizemap and populates the new one
+  @deprecatedOverriding("Internal implementation does not admit sensible overriding of this method.", "2.11.0")
   protected def sizeMapInitAndRebuild() {
     // first allocate
     sizeMapInit(table.length)
@@ -374,7 +382,7 @@ private[collection] object FlatHashTable {
   final def seedGenerator = new ThreadLocal[scala.util.Random] {
     override def initialValue = new scala.util.Random
   }
-  
+
   private object NullSentinel {
     override def hashCode = 0
     override def toString = "NullSentinel"
@@ -421,18 +429,18 @@ private[collection] object FlatHashTable {
       val rotated = (improved >>> rotation) | (improved << (32 - rotation))
       rotated
     }
-         
+
     /**
      * Elems have type A, but we store AnyRef in the table. Plus we need to deal with
      * null elems, which need to be stored as NullSentinel
      */
-    protected final def elemToEntry(elem : A) : AnyRef = 
+    protected final def elemToEntry(elem : A) : AnyRef =
       if (null == elem) NullSentinel else elem.asInstanceOf[AnyRef]
-    
+
     /**
      * Does the inverse translation of elemToEntry
      */
-    protected final def entryToElem(entry : AnyRef) : A = 
+    protected final def entryToElem(entry : AnyRef) : A =
       (if (entry.isInstanceOf[NullSentinel.type]) null else entry).asInstanceOf[A]
   }
 

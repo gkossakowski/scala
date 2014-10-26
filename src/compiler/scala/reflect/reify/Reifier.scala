@@ -20,6 +20,8 @@ abstract class Reifier extends States
   val global: Global
   import global._
   import definitions._
+  private val runDefinitions = currentRun.runDefinitions
+  import runDefinitions._
 
   val typer: global.analyzer.Typer
   val universe: Tree
@@ -84,7 +86,7 @@ abstract class Reifier extends States
           throw new Error("reifee %s of type %s is not supported".format(reifee, if (reifee == null) "null" else reifee.getClass.toString))
       }
 
-      // todo. why do we resetAllAttrs?
+      // todo. why do we reset attrs?
       //
       // typically we do some preprocessing before reification and
       // the code emitted/moved around during preprocessing is very hard to typecheck, so we leave it as it is
@@ -107,15 +109,15 @@ abstract class Reifier extends States
       //
       // todo. this is a common problem with non-trivial macros in our current macro system
       // needs to be solved some day
-      // maybe try `resetLocalAttrs` once the dust settles
+      // upd. a new hope: https://groups.google.com/forum/#!topic/scala-internals/TtCTPlj_qcQ
       var importantSymbols = Set[Symbol](
         NothingClass, AnyClass, SingletonClass, PredefModule, ScalaRunTimeModule, TypeCreatorClass, TreeCreatorClass, MirrorClass,
-        ApiUniverseClass, JavaUniverseClass, ReflectRuntimePackage, ReflectRuntimeCurrentMirror)
+        ApiUniverseClass, JavaUniverseClass, ReflectRuntimePackage, runDefinitions.ReflectRuntimeCurrentMirror)
       importantSymbols ++= importantSymbols map (_.companionSymbol)
       importantSymbols ++= importantSymbols map (_.moduleClass)
       importantSymbols ++= importantSymbols map (_.linkedClassOfClass)
       def isImportantSymbol(sym: Symbol): Boolean = sym != null && sym != NoSymbol && importantSymbols(sym)
-      val untyped = resetAllAttrs(result, leaveAlone = {
+      val untyped = brutallyResetAttrs(result, leaveAlone = {
         case ValDef(_, u, _, _) if u == nme.UNIVERSE_SHORT => true
         case ValDef(_, m, _, _) if m == nme.MIRROR_SHORT => true
         case tree if symtab.syms contains tree.symbol => true

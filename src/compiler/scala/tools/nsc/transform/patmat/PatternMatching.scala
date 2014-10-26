@@ -34,7 +34,8 @@ import scala.reflect.internal.util.Position
   *  - recover GADT typing by locally inserting implicit witnesses to type equalities derived from the current case, and considering these witnesses during subtyping (?)
   *  - recover exhaustivity/unreachability of user-defined extractors by partitioning the types they match on using an HList or similar type-level structure
   */
-trait PatternMatching extends Transform with TypingTransformers
+trait PatternMatching extends Transform
+                      with TypingTransformers
                       with Debugging
                       with Interface
                       with MatchTranslation
@@ -45,7 +46,8 @@ trait PatternMatching extends Transform with TypingTransformers
                       with Solving
                       with MatchAnalysis
                       with MatchOptimization
-                      with MatchWarnings {
+                      with MatchWarnings
+                      with ScalacPatternExpanders {
   import global._
 
   val phaseName: String = "patmat"
@@ -63,7 +65,7 @@ trait PatternMatching extends Transform with TypingTransformers
         } catch {
           case x: (Types#TypeError) =>
             // TODO: this should never happen; error should've been reported during type checking
-            unit.error(tree.pos, "error during expansion of this match (this is a scalac bug).\nThe underlying error was: "+ x.msg)
+            reporter.error(tree.pos, "error during expansion of this match (this is a scalac bug).\nThe underlying error was: "+ x.msg)
             translated
         }
       case Try(block, catches, finalizer) =>
@@ -106,7 +108,6 @@ trait Debugging {
 
 trait Interface extends ast.TreeDSL {
   import global._
-  import definitions._
   import analyzer.Typer
 
   // 2.10/2.11 compatibility
@@ -117,7 +118,6 @@ trait Interface extends ast.TreeDSL {
 
   object vpmName {
     val one       = newTermName("one")
-    val drop      = newTermName("drop")
     val flatMap   = newTermName("flatMap")
     val get       = newTermName("get")
     val guard     = newTermName("guard")
@@ -175,16 +175,13 @@ trait Interface extends ast.TreeDSL {
     val matchOwner = typer.context.owner
     def pureType(tp: Type): Type = tp
 
-    // Extracting from the monad: tp == { def get: T }, result == T
-    def matchMonadResult(tp: Type) = typeOfMemberNamedGet(tp)
-
-    def reportUnreachable(pos: Position) = typer.context.unit.warning(pos, "unreachable code")
+    def reportUnreachable(pos: Position) = reporter.warning(pos, "unreachable code")
     def reportMissingCases(pos: Position, counterExamples: List[String]) = {
       val ceString =
         if (counterExamples.tail.isEmpty) "input: " + counterExamples.head
         else "inputs: " + counterExamples.mkString(", ")
 
-      typer.context.unit.warning(pos, "match may not be exhaustive.\nIt would fail on the following "+ ceString)
+      reporter.warning(pos, "match may not be exhaustive.\nIt would fail on the following "+ ceString)
     }
   }
 

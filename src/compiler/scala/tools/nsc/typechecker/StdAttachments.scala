@@ -16,7 +16,7 @@ trait StdAttachments {
 
   /** Scratchpad for the macro expander, which is used to store all intermediate data except the details about the runtime.
    */
-  case class MacroExpanderAttachment(original: Tree, desugared: Tree, role: MacroRole)
+  case class MacroExpanderAttachment(original: Tree, desugared: Tree)
 
   /** Loads underlying MacroExpanderAttachment from a macro expandee or returns a default value for that attachment.
    */
@@ -24,15 +24,15 @@ trait StdAttachments {
     tree.attachments.get[MacroExpanderAttachment] getOrElse {
       tree match {
         case Apply(fn, _) if tree.isInstanceOf[ApplyToImplicitArgs] => macroExpanderAttachment(fn)
-        case _ => MacroExpanderAttachment(tree, EmptyTree, APPLY_ROLE)
+        case _ => MacroExpanderAttachment(tree, EmptyTree)
       }
     }
 
   /** After macro expansion is completed, links the expandee and the expansion result
    *  by annotating them both with a `MacroExpansionAttachment`.
    */
-  def linkExpandeeAndDesugared(expandee: Tree, desugared: Tree, role: MacroRole): Unit = {
-    val metadata = MacroExpanderAttachment(expandee, desugared, role)
+  def linkExpandeeAndDesugared(expandee: Tree, desugared: Tree): Unit = {
+    val metadata = MacroExpanderAttachment(expandee, desugared)
     expandee updateAttachment metadata
     desugared updateAttachment metadata
   }
@@ -46,9 +46,13 @@ trait StdAttachments {
    *  The parameter is of type `Any`, because macros can expand both into trees and into annotations.
    */
   def hasMacroExpansionAttachment(any: Any): Boolean = any match {
-    case tree: Tree => tree.attachments.get[MacroExpansionAttachment].isDefined
+    case tree: Tree => tree.hasAttachment[MacroExpansionAttachment]
     case _ => false
   }
+
+  /** Returns the original tree of the macro expansion if the argument is a macro expansion or EmptyTree otherwise.
+   */
+  def macroExpandee(tree: Tree): Tree = tree.attachments.get[MacroExpansionAttachment].map(_.expandee).getOrElse(EmptyTree)
 
   /** After macro expansion is completed, links the expandee and the expansion result by annotating them both with a `MacroExpansionAttachment`.
    *  The `expanded` parameter is of type `Any`, because macros can expand both into trees and into annotations.
@@ -59,15 +63,6 @@ trait StdAttachments {
     expanded match {
       case expanded: Tree => expanded updateAttachment metadata
       case _ => // do nothing
-    }
-  }
-
-  /** Checks whether there is any tree resulting from a macro expansion and associated with the current tree.
-   */
-  object ExpandedIntoTree {
-    def unapply(tree: Tree): Option[Tree] = tree.attachments.get[MacroExpansionAttachment] match {
-      case Some(MacroExpansionAttachment(_, tree: Tree)) => Some(tree)
-      case _ => None
     }
   }
 
@@ -100,8 +95,8 @@ trait StdAttachments {
   /** Determines whether a tree should not be expanded, because someone has put SuppressMacroExpansionAttachment on it or one of its children.
    */
   def isMacroExpansionSuppressed(tree: Tree): Boolean =
-    (  settings.Ymacronoexpand.value // SI-6812
-    || tree.attachments.get[SuppressMacroExpansionAttachment.type].isDefined
+    (  settings.Ymacroexpand.value == settings.MacroExpand.None // SI-6812
+    || tree.hasAttachment[SuppressMacroExpansionAttachment.type]
     || (tree match {
         // we have to account for the fact that during typechecking an expandee might become wrapped,
         // i.e. surrounded by an inferred implicit argument application or by an inferred type argument application.
@@ -155,5 +150,19 @@ trait StdAttachments {
   /** Determines whether a tree should or should not be adapted,
    *  because someone has put MacroImplRefAttachment on it.
    */
-  def isMacroImplRef(tree: Tree): Boolean = tree.attachments.get[MacroImplRefAttachment.type].isDefined
+  def isMacroImplRef(tree: Tree): Boolean = tree.hasAttachment[MacroImplRefAttachment.type]
+
+  /** Since mkInvoke, the applyDynamic/selectDynamic/etc desugarer, is disconnected
+   *  from typedNamedApply, the applyDynamicNamed argument rewriter, the latter
+   *  doesn’t know whether it needs to apply the rewriting because the application
+   *  has just been desugared or it needs to hold on because it’s already performed
+   *  a desugaring on this tree. This has led to SI-8006.
+   *
+   *  This attachment solves the problem by providing a means of communication
+   *  between the two Dynamic desugarers, which solves the aforementioned issue.
+   */
+  case object DynamicRewriteAttachment
+  def markDynamicRewrite(tree: Tree): Tree = tree.updateAttachment(DynamicRewriteAttachment)
+  def unmarkDynamicRewrite(tree: Tree): Tree = tree.removeAttachment[DynamicRewriteAttachment.type]
+  def isDynamicRewrite(tree: Tree): Boolean = tree.attachments.get[DynamicRewriteAttachment.type].isDefined
 }

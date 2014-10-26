@@ -1,1 +1,1 @@
--Ywarn-adapted-args -Xfatal-warnings
+-Xlint:adapted-args -Xfatal-warnings -deprecation

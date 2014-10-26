@@ -8,6 +8,8 @@ abstract class Taggers {
 
   import c.universe._
   import definitions._
+  private val runDefinitions = currentRun.runDefinitions
+  import runDefinitions._
 
   val coreTags = Map(
     ByteTpe -> nme.Byte,
@@ -63,13 +65,13 @@ abstract class Taggers {
         case _ =>
           translatingReificationErrors(materializer)
       }
-    try c.typeCheck(result)
+    try c.typecheck(result)
     catch { case terr @ TypecheckException(pos, msg) => failTag(result, terr) }
   }
 
   def materializeExpr(universe: Tree, mirror: Tree, expr: Tree): Tree = {
     val result = translatingReificationErrors(c.reifyTree(universe, mirror, expr))
-    try c.typeCheck(result)
+    try c.typecheck(result)
     catch { case terr @ TypecheckException(pos, msg) => failExpr(result, terr) }
   }
 

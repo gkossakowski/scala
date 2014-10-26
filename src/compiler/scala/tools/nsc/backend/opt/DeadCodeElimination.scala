@@ -22,6 +22,8 @@ abstract class DeadCodeElimination extends SubComponent {
 
   val phaseName = "dce"
 
+  override val enabled: Boolean = settings.Xdce
+
   /** Create a new phase */
   override def newPhase(p: Phase) = new DeadCodeEliminationPhase(p)
 
@@ -39,7 +41,13 @@ abstract class DeadCodeElimination extends SubComponent {
   }
 
   /** closures that are instantiated at least once, after dead code elimination */
-  val liveClosures: mutable.Set[Symbol] = new mutable.HashSet()
+  val liveClosures = perRunCaches.newSet[Symbol]()
+
+  /** closures that are eliminated, populated by GenASM.AsmPhase.run()
+   *  these class symbols won't have a .class physical file, thus shouldn't be included in InnerClasses JVM attribute,
+   *  otherwise some tools get confused or slow (SI-6546)
+   * */
+  val elidedClosures = perRunCaches.newSet[Symbol]()
 
   /** Remove dead code.
    */
@@ -87,8 +95,10 @@ abstract class DeadCodeElimination extends SubComponent {
         localStores.clear()
         clobbers.clear()
         m.code.blocks.clear()
+        m.code.touched = true
         accessedLocals = m.params.reverse
         m.code.blocks ++= linearizer.linearize(m)
+        m.code.touched = true
         collectRDef(m)
         mark()
         sweep(m)
@@ -111,7 +121,7 @@ abstract class DeadCodeElimination extends SubComponent {
       m foreachBlock { bb =>
         useful(bb) = new mutable.BitSet(bb.size)
         var rd = rdef.in(bb)
-        for (Pair(i, idx) <- bb.toList.zipWithIndex) {
+        for ((i, idx) <- bb.toList.zipWithIndex) {
 
           // utility for adding to worklist
           def moveToWorkList() = moveToWorkListIf(cond = true)
@@ -129,7 +139,7 @@ abstract class DeadCodeElimination extends SubComponent {
           i match {
 
             case LOAD_LOCAL(_) =>
-              defs = defs + Pair(((bb, idx)), rd.vars)
+              defs = defs + (((bb, idx), rd.vars))
               moveToWorkListIf(cond = false)
 
             case STORE_LOCAL(l) =>
@@ -159,9 +169,14 @@ abstract class DeadCodeElimination extends SubComponent {
 
             case RETURN(_) | JUMP(_) | CJUMP(_, _, _, _) | CZJUMP(_, _, _, _) | STORE_FIELD(_, _) |
                  THROW(_)   | LOAD_ARRAY_ITEM(_) | STORE_ARRAY_ITEM(_) | SCOPE_ENTER(_) | SCOPE_EXIT(_) | STORE_THIS(_) |
-                 LOAD_EXCEPTION(_) | SWITCH(_, _) | MONITOR_ENTER() | MONITOR_EXIT() | CHECK_CAST(_) =>
+                 LOAD_EXCEPTION(_) | SWITCH(_, _) | MONITOR_ENTER() | MONITOR_EXIT() | CHECK_CAST(_) | CREATE_ARRAY(_, _) =>
               moveToWorkList()
 
+            case LOAD_FIELD(sym, isStatic) if isStatic || !inliner.isClosureClass(sym.owner) =>
+              // static load may trigger static initization.
+              // non-static load can throw NPE (but we know closure fields can't be accessed via a
+              // null reference.
+              moveToWorkList()
             case CALL_METHOD(m1, _) if isSideEffecting(m1) =>
               moveToWorkList()
 
@@ -183,6 +198,8 @@ abstract class DeadCodeElimination extends SubComponent {
               moveToWorkListIf(necessary)
             case LOAD_MODULE(sym) if isLoadNeeded(sym) =>
               moveToWorkList() // SI-4859 Module initialization might side-effect.
+            case CALL_PRIMITIVE(Arithmetic(DIV | REM, INT | LONG) | ArrayLength(_)) =>
+              moveToWorkList() // SI-8601 Might divide by zero
             case _ => ()
               moveToWorkListIf(cond = false)
           }
@@ -342,7 +359,7 @@ abstract class DeadCodeElimination extends SubComponent {
         val oldInstr = bb.toList
         bb.open()
         bb.clear()
-        for (Pair(i, idx) <- oldInstr.zipWithIndex) {
+        for ((i, idx) <- oldInstr.zipWithIndex) {
           if (useful(bb)(idx)) {
             debuglog(" * " + i + " is useful")
             bb.emit(i, i.pos)
@@ -423,7 +440,7 @@ abstract class DeadCodeElimination extends SubComponent {
     }
 
     private def isPure(sym: Symbol) = (
-         (sym.isGetter && sym.isEffectivelyFinal && !sym.isLazy)
+         (sym.isGetter && sym.isEffectivelyFinalOrNotOverridden && !sym.isLazy)
       || (sym.isPrimaryConstructor && (sym.enclosingPackage == RuntimePackage || inliner.isClosureClass(sym.owner)))
     )
     /** Is 'sym' a side-effecting method? TODO: proper analysis.  */

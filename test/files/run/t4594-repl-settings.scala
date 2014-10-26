@@ -11,10 +11,10 @@ object Test extends SessionTest {
     |depp: String
     |
     |scala> def a = depp
-    |warning: there were 1 deprecation warning(s); re-run with -deprecation for details
+    |warning: there was one deprecation warning; re-run with -deprecation for details
     |a: String
     |
-    |scala> :settings +deprecation
+    |scala> :settings -deprecation
     |
     |scala> def b = depp
     |<console>:8: warning: method depp is deprecated: Please don't do that.
@@ -22,5 +22,5 @@ object Test extends SessionTest {
     |               ^
     |b: String
     |
-    |scala> """
+    |scala> :quit"""
 }

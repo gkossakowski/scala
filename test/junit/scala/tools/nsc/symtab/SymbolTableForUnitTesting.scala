@@ -1,6 +1,7 @@
 package scala.tools.nsc
 package symtab
 
+import scala.reflect.ClassTag
 import scala.reflect.internal.{Phase, NoPhase, SomePhase}
 import scala.tools.util.PathResolver
 import util.ClassPath
@@ -32,7 +33,6 @@ class SymbolTableForUnitTesting extends SymbolTable {
     lazy val loaders: SymbolTableForUnitTesting.this.loaders.type = SymbolTableForUnitTesting.this.loaders
     def platformPhases: List[SubComponent] = Nil
     val classPath: ClassPath[AbstractFile] = new PathResolver(settings).result
-    def doLoad(cls: ClassPath[AbstractFile]#ClassRep): Boolean = true
     def isMaybeBoxed(sym: Symbol): Boolean = ???
     def needCompile(bin: AbstractFile, src: AbstractFile): Boolean = ???
     def externalEquals: Symbol = ???
@@ -69,6 +69,19 @@ class SymbolTableForUnitTesting extends SymbolTable {
 
    // Members declared in scala.reflect.internal.Required
   def picklerPhase: scala.reflect.internal.Phase = SomePhase
+  def erasurePhase: scala.reflect.internal.Phase = SomePhase
+
+  // Members declared in scala.reflect.internal.Reporting
+  def reporter = new scala.reflect.internal.ReporterImpl {
+    protected def info0(pos: Position, msg: String, severity: Severity, force: Boolean): Unit = println(msg)
+  }
+
+  // minimal Run to get Reporting wired
+  def currentRun = new RunReporting {}
+  class PerRunReporting extends PerRunReportingBase {
+    def deprecationWarning(pos: Position, msg: String): Unit = reporter.warning(pos, msg)
+  }
+  protected def PerRunReporting = new PerRunReporting
 
   // Members declared in scala.reflect.internal.SymbolTable
   def currentRunId: Int = 1
@@ -85,5 +98,12 @@ class SymbolTableForUnitTesting extends SymbolTable {
   }
   lazy val treeInfo: scala.reflect.internal.TreeInfo{val global: SymbolTableForUnitTesting.this.type} = ???
 
+  val currentFreshNameCreator = new reflect.internal.util.FreshNameCreator
+
   phase = SomePhase
+
+  type RuntimeClass = java.lang.Class[_]
+  implicit val RuntimeClassTag: ClassTag[RuntimeClass] = ClassTag[RuntimeClass](classOf[RuntimeClass])
+  implicit val MirrorTag: ClassTag[Mirror] = ClassTag[Mirror](classOf[GlobalMirror])
+  implicit val TreeCopierTag: ClassTag[TreeCopier] = ClassTag[TreeCopier](classOf[TreeCopier])
 }

@@ -75,7 +75,7 @@ trait TraversableOnce[+A] extends Any with GenTraversableOnce[A] {
   //         at least indirectly. Currently, these are `ArrayOps` and `StringOps`.
   //         It is also implemented in `TraversableOnce[A]`.
   /** A version of this collection with all
-   *  of the operations implemented sequentially (i.e. in a single-threaded manner).
+   *  of the operations implemented sequentially (i.e., in a single-threaded manner).
    *
    *  This method returns a reference to this collection. In parallel collections,
    *  it is redefined to return a sequential implementation of this collection. In
@@ -85,10 +85,9 @@ trait TraversableOnce[+A] extends Any with GenTraversableOnce[A] {
    */
   def seq: TraversableOnce[A]
 
-  /** Presently these are abstract because the Traversable versions use
-   *  breakable/break, and I wasn't sure enough of how that's supposed to
-   *  function to consolidate them with the Iterator versions.
-   */
+  // Presently these are abstract because the Traversable versions use
+  // breakable/break, and I wasn't sure enough of how that's supposed to
+  // function to consolidate them with the Iterator versions.
   def forall(p: A => Boolean): Boolean
   def exists(p: A => Boolean): Boolean
   def find(p: A => Boolean): Option[A]
@@ -97,7 +96,7 @@ trait TraversableOnce[+A] extends Any with GenTraversableOnce[A] {
   // for internal use
   protected[this] def reversed = {
     var elems: List[A] = Nil
-    self.seq foreach (elems ::= _)
+    self foreach (elems ::= _)
     elems
   }
 
@@ -140,7 +139,7 @@ trait TraversableOnce[+A] extends Any with GenTraversableOnce[A] {
 
   def foldLeft[B](z: B)(op: (B, A) => B): B = {
     var result = z
-    this.seq foreach (x => result = op(result, x))
+    this foreach (x => result = op(result, x))
     result
   }
 
@@ -242,7 +241,7 @@ trait TraversableOnce[+A] extends Any with GenTraversableOnce[A] {
     var minF: B = null.asInstanceOf[B]
     var minElem: A = null.asInstanceOf[A]
     var first = true
-    
+
     for (elem <- self) {
       val fx = f(elem)
       if (first || cmp.lt(fx, minF)) {
@@ -320,14 +319,14 @@ trait TraversableOnce[+A] extends Any with GenTraversableOnce[A] {
    * Example:
    *
    * {{{
-   *      scala> val a = LinkedList(1,2,3,4)
-   *      a: scala.collection.mutable.LinkedList[Int] = LinkedList(1, 2, 3, 4)
-   *
+   *      scala> val a = List(1,2,3,4)
+   *      a: List[Int] = List(1, 2, 3, 4)
+   *      
    *      scala> val b = new StringBuilder()
-   *      b: StringBuilder =
-   *
-   *      scala> a.addString(b, "LinkedList(", ", ", ")")
-   *      res1: StringBuilder = LinkedList(1, 2, 3, 4)
+   *      b: StringBuilder = 
+   *      
+   *      scala> a.addString(b , "List(" , ", " , ")")
+   *      res5: StringBuilder = List(1, 2, 3, 4)
    * }}}
    *
    *  @param  b    the string builder to which elements are appended.
@@ -362,9 +361,9 @@ trait TraversableOnce[+A] extends Any with GenTraversableOnce[A] {
    * Example:
    *
    * {{{
-   *      scala> val a = LinkedList(1,2,3,4)
-   *      a: scala.collection.mutable.LinkedList[Int] = LinkedList(1, 2, 3, 4)
-   *
+   *      scala> val a = List(1,2,3,4)
+   *      a: List[Int] = List(1, 2, 3, 4)
+   *      
    *      scala> val b = new StringBuilder()
    *      b: StringBuilder =
    *
@@ -385,14 +384,14 @@ trait TraversableOnce[+A] extends Any with GenTraversableOnce[A] {
    * Example:
    *
    * {{{
-   *      scala> val a = LinkedList(1,2,3,4)
-   *      a: scala.collection.mutable.LinkedList[Int] = LinkedList(1, 2, 3, 4)
-   *
+   *      scala> val a = List(1,2,3,4)
+   *      a: List[Int] = List(1, 2, 3, 4)
+   *      
    *      scala> val b = new StringBuilder()
    *      b: StringBuilder =
    *
    *      scala> val h = a.addString(b)
-   *      b: StringBuilder = 1234
+   *      h: StringBuilder = 1234
    * }}}
 
    *  @param  b    the string builder to which elements are appended.

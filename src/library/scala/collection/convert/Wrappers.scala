@@ -102,8 +102,14 @@ private[collection] trait Wrappers {
     override def clone(): JListWrapper[A] = JListWrapper(new ju.ArrayList[A](underlying))
   }
 
+  // Note various overrides to avoid performance gotchas.
   class SetWrapper[A](underlying: Set[A]) extends ju.AbstractSet[A] {
     self =>
+    override def contains(o: Object): Boolean = {
+      try { underlying.contains(o.asInstanceOf[A]) }
+      catch { case cce: ClassCastException => false }
+    }
+    override def isEmpty = underlying.isEmpty
     def size = underlying.size
     def iterator = new ju.Iterator[A] {
       val ui = underlying.iterator
@@ -188,7 +194,7 @@ private[collection] trait Wrappers {
             def getKey = k
             def getValue = v
             def setValue(v1 : B) = self.put(k, v1)
-            override def hashCode = byteswap32(k.hashCode) + (byteswap32(v.hashCode) << 16)
+            override def hashCode = byteswap32(k.##) + (byteswap32(v.##) << 16)
             override def equals(other: Any) = other match {
               case e: ju.Map.Entry[_, _] => k == e.getKey && v == e.getValue
               case _ => false
@@ -211,6 +217,15 @@ private[collection] trait Wrappers {
           }
         }
       }
+    }
+
+    override def containsKey(key: AnyRef): Boolean = try {
+      // Note: Subclass of collection.Map with specific key type may redirect generic
+      // contains to specific contains, which will throw a ClassCastException if the
+      // wrong type is passed. This is why we need a type cast to A inside a try/catch.
+      underlying.contains(key.asInstanceOf[A])
+    } catch {
+      case ex: ClassCastException => false
     }
   }
 
@@ -273,6 +288,13 @@ private[collection] trait Wrappers {
     override def empty: Repr = null.asInstanceOf[Repr]
   }
 
+  /** Wraps a Java map as a Scala one.  If the map is to support concurrent access,
+    * use [[JConcurrentMapWrapper]] instead.  If the wrapped map is synchronized 
+    * (e.g. from `java.util.Collections.synchronizedMap`), it is your responsibility 
+    * to wrap all non-atomic operations with `underlying.synchronized`.
+    * This includes `get`, as `java.util.Map`'s API does not allow for an
+    * atomic `get` when `null` values may be present.
+    */
   case class JMapWrapper[A, B](underlying : ju.Map[A, B]) extends mutable.AbstractMap[A, B] with JMapWrapperLike[A, B, JMapWrapper[A, B]] {
     override def empty = JMapWrapper(new ju.HashMap[A, B])
   }
@@ -299,6 +321,10 @@ private[collection] trait Wrappers {
     def replace(k: A, oldval: B, newval: B) = underlying.replace(k, oldval, newval)
   }
 
+  /** Wraps a concurrent Java map as a Scala one.  Single-element concurrent
+    * access is supported; multi-element operations such as maps and filters
+    * are not guaranteed to be atomic.
+    */
   case class JConcurrentMapWrapper[A, B](underlying: juc.ConcurrentMap[A, B]) extends mutable.AbstractMap[A, B] with JMapWrapperLike[A, B, JConcurrentMapWrapper[A, B]] with concurrent.Map[A, B] {
     override def get(k: A) = {
       val v = underlying get k

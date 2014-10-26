@@ -18,19 +18,20 @@ trait DocComments { self: Global =>
 
   val cookedDocComments = mutable.HashMap[Symbol, String]()
 
-  /** The raw doc comment map */
-  val docComments = mutable.HashMap[Symbol, DocComment]()
+  /** The raw doc comment map
+   *
+   * In IDE, background compilation runs get interrupted by
+   * reloading new sourcefiles. This is weak to avoid
+   * memleaks due to the doc of their cached symbols
+   * (e.g. in baseTypeSeq) between periodic doc reloads.
+   */
+  val docComments = mutable.WeakHashMap[Symbol, DocComment]()
 
   def clearDocComments() {
     cookedDocComments.clear()
     docComments.clear()
     defs.clear()
   }
-
-  /** Associate comment with symbol `sym` at position `pos`. */
-  def docComment(sym: Symbol, docStr: String, pos: Position = NoPosition) =
-    if ((sym ne null) && (sym ne NoSymbol))
-      docComments += (sym -> DocComment(docStr, pos))
 
   /** The raw doc comment of symbol `sym`, as it appears in the source text, "" if missing.
    */
@@ -58,14 +59,21 @@ trait DocComments { self: Global =>
     comment.defineVariables(sym)
   }
 
+
+  def replaceInheritDocToInheritdoc(docStr: String):String  = {
+    docStr.replaceAll("""\{@inheritDoc\p{Zs}*\}""", "@inheritdoc")
+  }
+
   /** The raw doc comment of symbol `sym`, minus usecase and define sections, augmented by
    *  missing sections of an inherited doc comment.
    *  If a symbol does not have a doc comment but some overridden version of it does,
    *  the doc comment of the overridden version is copied instead.
    */
   def cookedDocComment(sym: Symbol, docStr: String = ""): String = cookedDocComments.getOrElseUpdate(sym, {
-    val ownComment = if (docStr.length == 0) docComments get sym map (_.template) getOrElse ""
+    var ownComment = if (docStr.length == 0) docComments get sym map (_.template) getOrElse ""
                        else DocComment(docStr).template
+    ownComment = replaceInheritDocToInheritdoc(ownComment)
+
     superComment(sym) match {
       case None =>
         if (ownComment.indexOf("@inheritdoc") != -1)
@@ -92,11 +100,6 @@ trait DocComments { self: Global =>
                 else site
     expandVariables(cookedDocComment(sym, docStr), sym, site1)
   }
-
-  /** The cooked doc comment of symbol `sym` after variable expansion, or "" if missing.
-   *  @param sym  The symbol for which doc comment is returned (site is always the containing class)
-   */
-  def expandedDocComment(sym: Symbol): String = expandedDocComment(sym, sym.enclClass)
 
   /** The list of use cases of doc comment of symbol `sym` seen as a member of class
    *  `site`. Each use case consists of a synthetic symbol (which is entered nowhere else),
@@ -125,10 +128,6 @@ trait DocComments { self: Global =>
     }
     getDocComment(sym) map getUseCases getOrElse List()
   }
-
-  /** Returns the javadoc format of doc comment string `s`, including wiki expansion
-   */
-  def toJavaDoc(s: String): String = expandWiki(s)
 
   private val wikiReplacements = List(
     ("""(\n\s*\*?)(\s*\n)"""    .r, """$1 <p>$2"""),

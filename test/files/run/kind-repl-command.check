@@ -1,8 +1,6 @@
 Type in expressions to have them evaluated.
 Type :help for more information.
 
-scala> 
-
 scala> :kind scala.Option
 scala.Option's kind is F[+A]
 
@@ -27,6 +25,4 @@ scala> :k Nonexisting
               Nonexisting
               ^
 
-scala> 
-
-scala> 
+scala> :quit

@@ -22,10 +22,11 @@ import mutable.{ ListBuffer, Builder }
 object ListSet extends ImmutableSetFactory[ListSet] {
   /** setCanBuildFromInfo */
   implicit def canBuildFrom[A]: CanBuildFrom[Coll, A, ListSet[A]] = setCanBuildFrom[A]
-  override def empty[A] = EmptyListSet.asInstanceOf[ListSet[A]]
+
   override def newBuilder[A]: Builder[A, ListSet[A]] = new ListSetBuilder[A]
 
   private object EmptyListSet extends ListSet[Any] { }
+  private[collection] def emptyInstance: ListSet[Any] = EmptyListSet
 
   /** A custom builder because forgetfully adding elements one at
    *  a time to a list backed set puts the "squared" in N^2.  There is a
@@ -64,6 +65,7 @@ object ListSet extends ImmutableSetFactory[ListSet] {
  *  @define mayNotTerminateInf
  *  @define willNotTerminateInf
  */
+@deprecatedInheritance("The semantics of immutable collections makes inheriting from ListSet error-prone.", "2.11.0")
 class ListSet[A] extends AbstractSet[A]
                     with Set[A]
                     with GenericSetTemplate[A, ListSet]
@@ -135,6 +137,13 @@ class ListSet[A] extends AbstractSet[A]
   override def tail: ListSet[A] = throw new NoSuchElementException("Next of an empty set")
 
   override def stringPrefix = "ListSet"
+
+  /** Returns this $coll as an immutable set.
+   *  
+   *  A new set will not be built; lazy collections will stay lazy.
+   */
+  @deprecatedOverriding("Immutable sets should do nothing on toSet but return themselves cast as a Set.", "2.11.0")
+  override def toSet[B >: A]: Set[B] = this.asInstanceOf[Set[B]]
 
   /** Represents an entry in the `ListSet`.
    */

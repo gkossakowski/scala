@@ -62,10 +62,10 @@ private[scala] trait PropertiesTrait {
 
   def envOrSome(name: String, alt: Option[String])       = envOrNone(name) orElse alt
 
-  // for values based on propFilename
-  def scalaPropOrElse(name: String, alt: String): String = scalaProps.getProperty(name, alt)
+  // for values based on propFilename, falling back to System properties
+  def scalaPropOrElse(name: String, alt: String): String = scalaPropOrNone(name).getOrElse(alt)
   def scalaPropOrEmpty(name: String): String             = scalaPropOrElse(name, "")
-  def scalaPropOrNone(name: String): Option[String]      = Option(scalaProps.getProperty(name))
+  def scalaPropOrNone(name: String): Option[String]      = Option(scalaProps.getProperty(name)).orElse(propOrNone("scala." + name))
 
   /** The numeric portion of the runtime Scala version, if this is a final
    *  release.  If for instance the versionString says "version 2.9.0.final",
@@ -107,7 +107,7 @@ private[scala] trait PropertiesTrait {
   val versionString         = "version " + scalaPropOrElse("version.number", "(unknown)")
   val copyrightString       = scalaPropOrElse("copyright.string", "Copyright 2002-2013, LAMP/EPFL")
 
-  /** This is the encoding to use reading in source files, overridden with -encoding
+  /** This is the encoding to use reading in source files, overridden with -encoding.
    *  Note that it uses "prop" i.e. looks in the scala jar, not the system properties.
    */
   def sourceEncoding        = scalaPropOrElse("file.encoding", "UTF-8")
@@ -147,7 +147,7 @@ private[scala] trait PropertiesTrait {
   // See http://mail.openjdk.java.net/pipermail/macosx-port-dev/2012-November/005148.html for
   // the reason why we don't follow developer.apple.com/library/mac/#technotes/tn2002/tn2110.
   /** Returns `true` iff the underlying operating system is a version of Apple Mac OSX.  */
-  def isMac                 = osName startsWith "Mac OS X" 
+  def isMac                 = osName startsWith "Mac OS X"
 
   /* Some runtime values. */
   private[scala] def isAvian = javaVmName contains "Avian"
@@ -155,9 +155,12 @@ private[scala] trait PropertiesTrait {
   // This is looking for javac, tools.jar, etc.
   // Tries JDK_HOME first, then the more common but likely jre JAVA_HOME,
   // and finally the system property based javaHome.
-  def jdkHome              = envOrElse("JDK_HOME", envOrElse("JAVA_HOME", javaHome))
+  def jdkHome               = envOrElse("JDK_HOME", envOrElse("JAVA_HOME", javaHome))
 
-  def versionMsg            = "Scala %s %s -- %s".format(propCategory, versionString, copyrightString)
+  // private[scala] for 2.12
+  private[this] def versionFor(command: String) = f"Scala $command $versionString -- $copyrightString"
+
+  def versionMsg            = versionFor(propCategory)
   def scalaCmd              = if (isWin) "scala.bat" else "scala"
   def scalacCmd             = if (isWin) "scalac.bat" else "scalac"
 
@@ -173,7 +176,7 @@ private[scala] trait PropertiesTrait {
    * isJavaAtLeast("1.6")            // true
    * isJavaAtLeast("1.7")            // true
    * isJavaAtLeast("1.8")            // false
-   * }}
+   * }}}
    */
   def isJavaAtLeast(version: String): Boolean = {
     def parts(x: String) = {

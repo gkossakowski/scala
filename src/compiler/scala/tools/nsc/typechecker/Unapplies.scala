@@ -39,17 +39,8 @@ trait Unapplies extends ast.TreeDSL {
    */
   def unapplyMember(tp: Type): Symbol = directUnapplyMember(tp) filter (sym => !hasMultipleNonImplicitParamLists(sym))
 
-  object ExtractorType {
+  object HasUnapply {
     def unapply(tp: Type): Option[Symbol] = unapplyMember(tp).toOption
-  }
-
-  def copyUntyped[T <: Tree](tree: T): T =
-    returning[T](tree.duplicate)(UnTyper traverse _)
-
-  def copyUntypedInvariant(td: TypeDef): TypeDef = {
-    val copy = treeCopy.TypeDef(td, td.mods &~ (COVARIANT | CONTRAVARIANT), td.name, td.tparams, td.rhs)
-
-    returning[TypeDef](copy.duplicate)(UnTyper traverse _)
   }
 
   private def toIdent(x: DefTree) = Ident(x.name) setPos x.pos.focus
@@ -61,8 +52,15 @@ trait Unapplies extends ast.TreeDSL {
   }
 
   private def constrParamss(cdef: ClassDef): List[List[ValDef]] = {
-    val DefDef(_, _, _, vparamss, _, _) = treeInfo firstConstructor cdef.impl.body
-    mmap(vparamss)(copyUntyped[ValDef])
+    val ClassDef(_, _, _, Template(_, _, body)) = resetAttrs(cdef.duplicate)
+    val DefDef(_, _, _, vparamss, _, _) = treeInfo firstConstructor body
+    vparamss
+  }
+
+  private def constrTparamsInvariant(cdef: ClassDef): List[TypeDef] = {
+    val ClassDef(_, _, tparams, _) = resetAttrs(cdef.duplicate)
+    val tparamsInvariant = tparams.map(tparam => copyTypeDef(tparam)(mods = tparam.mods &~ (COVARIANT | CONTRAVARIANT)))
+    tparamsInvariant
   }
 
   /** The return value of an unapply method of a case class C[Ts]
@@ -122,13 +120,13 @@ trait Unapplies extends ast.TreeDSL {
     ModuleDef(
       Modifiers(cdef.mods.flags & AccessFlags | SYNTHETIC, cdef.mods.privateWithin),
       cdef.name.toTermName,
-      gen.mkTemplate(parents, emptyValDef, NoMods, Nil, body, cdef.impl.pos.focus))
+      gen.mkTemplate(parents, noSelfType, NoMods, Nil, body, cdef.impl.pos.focus))
   }
 
   /** The apply method corresponding to a case class
    */
   def factoryMeth(mods: Modifiers, name: TermName, cdef: ClassDef): DefDef = {
-    val tparams   = cdef.tparams map copyUntypedInvariant
+    val tparams   = constrTparamsInvariant(cdef)
     val cparamss  = constrParamss(cdef)
     def classtpe = classType(cdef, tparams)
     atPos(cdef.pos.focus)(
@@ -144,7 +142,7 @@ trait Unapplies extends ast.TreeDSL {
   /** The unapply method corresponding to a case class
    */
   def caseModuleUnapplyMeth(cdef: ClassDef): DefDef = {
-    val tparams   = cdef.tparams map copyUntypedInvariant
+    val tparams   = constrTparamsInvariant(cdef)
     val method    = constrParamss(cdef) match {
       case xs :: _ if xs.nonEmpty && isRepeatedParamType(xs.last.tpt) => nme.unapplySeq
       case _                                                          => nme.unapply
@@ -199,7 +197,7 @@ trait Unapplies extends ast.TreeDSL {
         treeCopy.ValDef(vd, Modifiers(flags), vd.name, tpt, rhs)
       }
 
-      val tparams = cdef.tparams map copyUntypedInvariant
+      val tparams = constrTparamsInvariant(cdef)
       val paramss = classParamss match {
         case Nil => Nil
         case ps :: pss =>

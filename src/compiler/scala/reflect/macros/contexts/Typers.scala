@@ -1,8 +1,6 @@
 package scala.reflect.macros
 package contexts
 
-import scala.reflect.internal.Mode
-
 trait Typers {
   self: Context =>
 
@@ -10,21 +8,24 @@ trait Typers {
 
   def openImplicits: List[ImplicitCandidate] = callsiteTyper.context.openImplicits.map(_.toImplicitCandidate)
 
+  type TypecheckMode = scala.reflect.internal.Mode
+  val TypecheckMode = scala.reflect.internal.Mode
+  val TERMmode = TypecheckMode.EXPRmode
+  val TYPEmode = TypecheckMode.TYPEmode | TypecheckMode.FUNmode
+  val PATTERNmode = TypecheckMode.PATTERNmode
+
   /**
    * @see [[scala.tools.reflect.ToolBox.typeCheck]]
    */
-  def typeCheck(tree: Tree, pt: Type = universe.WildcardType, silent: Boolean = false, withImplicitViewsDisabled: Boolean = false, withMacrosDisabled: Boolean = false): Tree = {
+  def typecheck(tree: Tree, mode: TypecheckMode = TERMmode, pt: Type = universe.WildcardType, silent: Boolean = false, withImplicitViewsDisabled: Boolean = false, withMacrosDisabled: Boolean = false): Tree = {
     macroLogVerbose("typechecking %s with expected type %s, implicit views = %s, macros = %s".format(tree, pt, !withImplicitViewsDisabled, !withMacrosDisabled))
     val context = callsiteTyper.context
-    val wrapper1 = if (!withImplicitViewsDisabled) (context.withImplicitsEnabled[Tree] _) else (context.withImplicitsDisabled[Tree] _)
-    val wrapper2 = if (!withMacrosDisabled) (context.withMacrosEnabled[Tree] _) else (context.withMacrosDisabled[Tree] _)
-    def wrapper (tree: => Tree) = wrapper1(wrapper2(tree))
-    // if you get a "silent mode is not available past typer" here
-    // don't rush to change the typecheck not to use the silent method when the silent parameter is false
-    // typechecking uses silent anyways (e.g. in typedSelect), so you'll only waste your time
-    // I'd advise fixing the root cause: finding why the context is not set to report errors
-    // (also see reflect.runtime.ToolBoxes.typeCheckExpr for a workaround that might work for you)
-    wrapper(callsiteTyper.silent(_.typed(tree, pt), reportAmbiguousErrors = false) match {
+    val withImplicitFlag = if (!withImplicitViewsDisabled) (context.withImplicitsEnabled[Tree] _) else (context.withImplicitsDisabled[Tree] _)
+    val withMacroFlag = if (!withMacrosDisabled) (context.withMacrosEnabled[Tree] _) else (context.withMacrosDisabled[Tree] _)
+    def withContext(tree: => Tree) = withImplicitFlag(withMacroFlag(tree))
+    def withWrapping(tree: Tree)(op: Tree => Tree) = if (mode == TERMmode) universe.wrappingIntoTerm(tree)(op) else op(tree)
+    def typecheckInternal(tree: Tree) = callsiteTyper.silent(_.typed(universe.duplicateAndKeepPositions(tree), mode, pt), reportAmbiguousErrors = false)
+    withWrapping(tree)(wrappedTree => withContext(typecheckInternal(wrappedTree) match {
       case universe.analyzer.SilentResultValue(result) =>
         macroLogVerbose(result)
         result
@@ -32,7 +33,7 @@ trait Typers {
         macroLogVerbose(error.err.errMsg)
         if (!silent) throw new TypecheckException(error.err.errPos, error.err.errMsg)
         universe.EmptyTree
-    })
+    }))
   }
 
   def inferImplicitValue(pt: Type, silent: Boolean = true, withMacrosDisabled: Boolean = false, pos: Position = enclosingPosition): Tree = {
@@ -46,7 +47,7 @@ trait Typers {
     universe.analyzer.inferImplicit(tree, viewTpe, true, callsiteTyper.context, silent, withMacrosDisabled, pos, (pos, msg) => throw TypecheckException(pos, msg))
   }
 
-  def resetAllAttrs(tree: Tree): Tree = universe.resetAllAttrs(tree)
+  def resetLocalAttrs(tree: Tree): Tree = universe.resetAttrs(universe.duplicateAndKeepPositions(tree))
 
-  def resetLocalAttrs(tree: Tree): Tree = universe.resetLocalAttrs(tree)
+  def untypecheck(tree: Tree): Tree = resetLocalAttrs(tree)
 }

@@ -41,7 +41,8 @@ package api
  *   res1: reflect.runtime.universe.Type = scala.Either[String,Int]
  *   }}}
  *
- * To obtain a `Universe` for use within a Scala macro, use [[scala.reflect.macros.Context#universe]]. For example:
+ * To obtain a `Universe` for use within a Scala macro, use [[scala.reflect.macros.blackbox.Context#universe]].
+ * or [[scala.reflect.macros.whitebox.Context#universe]]. For example:
  * {{{
  *  def printf(format: String, params: Any*): Unit = macro impl
  *  def impl(c: Context)(format: c.Expr[String], params: c.Expr[Any]*): c.Expr[Unit] = {
@@ -68,25 +69,24 @@ abstract class Universe extends Symbols
                            with Positions
                            with Exprs
                            with TypeTags
-                           with TagInterop
                            with ImplicitTags
                            with StandardDefinitions
                            with StandardNames
                            with StandardLiftables
-                           with BuildUtils
                            with Mirrors
                            with Printers
-                           with Importers
+                           with Liftables
                            with Quasiquotes
+                           with Internals
 {
-  /** Use `refiy` to produce the abstract syntax tree representing a given Scala expression.
+  /** Use `reify` to produce the abstract syntax tree representing a given Scala expression.
    *
    * For example:
    *
    * {{{
-   * val five = reify{ 5 }    // Literal(Constant(5))
-   * reify{ 2 + 4 }           // Apply( Select( Literal(Constant(2)), newTermName("\$plus")), List( Literal(Constant(4)) ) )
-   * reify{ five.splice + 4 } // Apply( Select( Literal(Constant(5)), newTermName("\$plus")), List( Literal(Constant(4)) ) )
+   * val five = reify{ 5 }         // Literal(Constant(5))
+   * reify{ 5.toString }           // Apply(Select(Literal(Constant(5)), TermName("toString")), List())
+   * reify{ five.splice.toString } // Apply(Select(five, TermName("toString")), List())
    * }}}
    *
    * The produced tree is path dependent on the Universe `reify` was called from.

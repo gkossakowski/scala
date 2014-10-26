@@ -38,7 +38,7 @@ trait BaseTypeSeqs {
    *  This is necessary because when run from reflection every base type sequence needs to have a
    *  SynchronizedBaseTypeSeq as mixin.
    */
-  class BaseTypeSeq protected[BaseTypeSeqs] (private[BaseTypeSeqs] val parents: List[Type], private[BaseTypeSeqs] val elems: Array[Type]) {
+  class BaseTypeSeq protected[reflect] (private[BaseTypeSeqs] val parents: List[Type], private[BaseTypeSeqs] val elems: Array[Type]) {
   self =>
     if (Statistics.canEnable) Statistics.incCounter(baseTypeSeqCount)
     if (Statistics.canEnable) Statistics.incCounter(baseTypeSeqLenTotal, elems.length)
@@ -166,9 +166,10 @@ trait BaseTypeSeqs {
       val index = new Array[Int](nparents)
       var i = 0
       for (p <- parents) {
+        val parentBts = p.dealias.baseTypeSeq // dealias need for SI-8046.
         pbtss(i) =
-          if (p.baseTypeSeq eq undetBaseTypeSeq) AnyClass.info.baseTypeSeq
-          else p.baseTypeSeq
+          if (parentBts eq undetBaseTypeSeq) AnyClass.info.baseTypeSeq
+          else parentBts
         index(i) = 0
         i += 1
       }

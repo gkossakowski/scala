@@ -2,8 +2,8 @@ reload: Completions.scala
 
 askTypeCompletion at Completions.scala(14,12)
 ================================================================================
-[response] askCompletionAt (14,12)
-retrieved 41 members
+[response] askTypeCompletion at (14,12)
+retrieved 35 members
 [inaccessible] private[this] def secretPrivateThis(): Unit
 def +(other: String): String
 def ->[B](y: B): (accessibility.Foo, B)
@@ -19,10 +19,8 @@ def someTests(other: accessibility.Foo): Unit
 def toString(): String
 def →[B](y: B): (accessibility.Foo, B)
 final def !=(x$1: Any): Boolean
-final def !=(x$1: AnyRef): Boolean
 final def ##(): Int
 final def ==(x$1: Any): Boolean
-final def ==(x$1: AnyRef): Boolean
 final def asInstanceOf[T0]: T0
 final def eq(x$1: AnyRef): Boolean
 final def isInstanceOf[T0]: Boolean
@@ -34,10 +32,6 @@ final def wait(): Unit
 final def wait(x$1: Long): Unit
 final def wait(x$1: Long,x$2: Int): Unit
 private def secretPrivate(): Unit
-private[this] val __leftOfArrow: accessibility.Foo
-private[this] val __resultOfEnsuring: accessibility.Foo
-private[this] val __stringToFormat: accessibility.Foo
-private[this] val __thingToAdd: accessibility.Foo
 protected def secretProtected(): Unit
 protected[package accessibility] def secretProtectedInPackage(): Unit
 protected[package lang] def clone(): Object
@@ -46,8 +40,8 @@ protected[package lang] def finalize(): Unit
 
 askTypeCompletion at Completions.scala(16,11)
 ================================================================================
-[response] askCompletionAt (16,11)
-retrieved 41 members
+[response] askTypeCompletion at (16,11)
+retrieved 35 members
 def +(other: String): String
 def ->[B](y: B): (accessibility.Foo, B)
 def ensuring(cond: Boolean): accessibility.Foo
@@ -62,10 +56,8 @@ def someTests(other: accessibility.Foo): Unit
 def toString(): String
 def →[B](y: B): (accessibility.Foo, B)
 final def !=(x$1: Any): Boolean
-final def !=(x$1: AnyRef): Boolean
 final def ##(): Int
 final def ==(x$1: Any): Boolean
-final def ==(x$1: AnyRef): Boolean
 final def asInstanceOf[T0]: T0
 final def eq(x$1: AnyRef): Boolean
 final def isInstanceOf[T0]: Boolean
@@ -78,10 +70,6 @@ final def wait(x$1: Long): Unit
 final def wait(x$1: Long,x$2: Int): Unit
 private def secretPrivate(): Unit
 private[this] def secretPrivateThis(): Unit
-private[this] val __leftOfArrow: accessibility.Foo
-private[this] val __resultOfEnsuring: accessibility.Foo
-private[this] val __stringToFormat: accessibility.Foo
-private[this] val __thingToAdd: accessibility.Foo
 protected def secretProtected(): Unit
 protected[package accessibility] def secretProtectedInPackage(): Unit
 protected[package lang] def clone(): Object
@@ -90,9 +78,8 @@ protected[package lang] def finalize(): Unit
 
 askTypeCompletion at Completions.scala(22,11)
 ================================================================================
-[response] askCompletionAt (22,11)
-retrieved 41 members
-[inaccessible] private def secretPrivate(): Unit
+[response] askTypeCompletion at (22,11)
+retrieved 34 members
 def +(other: String): String
 def ->[B](y: B): (accessibility.AccessibilityChecks, B)
 def ensuring(cond: Boolean): accessibility.AccessibilityChecks
@@ -108,10 +95,8 @@ def someTests: Unit
 def toString(): String
 def →[B](y: B): (accessibility.AccessibilityChecks, B)
 final def !=(x$1: Any): Boolean
-final def !=(x$1: AnyRef): Boolean
 final def ##(): Int
 final def ==(x$1: Any): Boolean
-final def ==(x$1: AnyRef): Boolean
 final def asInstanceOf[T0]: T0
 final def eq(x$1: AnyRef): Boolean
 final def isInstanceOf[T0]: Boolean
@@ -122,10 +107,6 @@ final def synchronized[T0](x$1: T0): T0
 final def wait(): Unit
 final def wait(x$1: Long): Unit
 final def wait(x$1: Long,x$2: Int): Unit
-private[this] val __leftOfArrow: accessibility.AccessibilityChecks
-private[this] val __resultOfEnsuring: accessibility.AccessibilityChecks
-private[this] val __stringToFormat: accessibility.AccessibilityChecks
-private[this] val __thingToAdd: accessibility.AccessibilityChecks
 protected def secretProtected(): Unit
 protected[package accessibility] def secretProtectedInPackage(): Unit
 protected[package lang] def clone(): Object
@@ -134,8 +115,8 @@ protected[package lang] def finalize(): Unit
 
 askTypeCompletion at Completions.scala(28,10)
 ================================================================================
-[response] askCompletionAt (28,10)
-retrieved 41 members
+[response] askTypeCompletion at (28,10)
+retrieved 35 members
 [inaccessible] private def secretPrivate(): Unit
 [inaccessible] private[this] def secretPrivateThis(): Unit
 [inaccessible] protected def secretProtected(): Unit
@@ -155,10 +136,8 @@ def someTests(other: accessibility.Foo): Unit
 def toString(): String
 def →[B](y: B): (accessibility.Foo, B)
 final def !=(x$1: Any): Boolean
-final def !=(x$1: AnyRef): Boolean
 final def ##(): Int
 final def ==(x$1: Any): Boolean
-final def ==(x$1: AnyRef): Boolean
 final def asInstanceOf[T0]: T0
 final def eq(x$1: AnyRef): Boolean
 final def isInstanceOf[T0]: Boolean
@@ -169,17 +148,13 @@ final def synchronized[T0](x$1: T0): T0
 final def wait(): Unit
 final def wait(x$1: Long): Unit
 final def wait(x$1: Long,x$2: Int): Unit
-private[this] val __leftOfArrow: accessibility.Foo
-private[this] val __resultOfEnsuring: accessibility.Foo
-private[this] val __stringToFormat: accessibility.Foo
-private[this] val __thingToAdd: accessibility.Foo
 protected[package accessibility] def secretProtectedInPackage(): Unit
 ================================================================================
 
 askTypeCompletion at Completions.scala(37,8)
 ================================================================================
-[response] askCompletionAt (37,8)
-retrieved 41 members
+[response] askTypeCompletion at (37,8)
+retrieved 35 members
 [inaccessible] private def secretPrivate(): Unit
 [inaccessible] private[this] def secretPrivateThis(): Unit
 [inaccessible] protected def secretProtected(): Unit
@@ -200,10 +175,8 @@ def someTests(other: accessibility.Foo): Unit
 def toString(): String
 def →[B](y: B): (accessibility.Foo, B)
 final def !=(x$1: Any): Boolean
-final def !=(x$1: AnyRef): Boolean
 final def ##(): Int
 final def ==(x$1: Any): Boolean
-final def ==(x$1: AnyRef): Boolean
 final def asInstanceOf[T0]: T0
 final def eq(x$1: AnyRef): Boolean
 final def isInstanceOf[T0]: Boolean
@@ -214,8 +187,4 @@ final def synchronized[T0](x$1: T0): T0
 final def wait(): Unit
 final def wait(x$1: Long): Unit
 final def wait(x$1: Long,x$2: Int): Unit
-private[this] val __leftOfArrow: accessibility.Foo
-private[this] val __resultOfEnsuring: accessibility.Foo
-private[this] val __stringToFormat: accessibility.Foo
-private[this] val __thingToAdd: accessibility.Foo
 ================================================================================

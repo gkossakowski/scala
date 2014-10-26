@@ -29,6 +29,8 @@ import scala.annotation.unchecked.uncheckedVariance
 import scala.annotation.unchecked.uncheckedStable
 import scala.language.{ higherKinds, implicitConversions }
 
+import scala.collection.parallel.ParallelCollectionImplicits._
+
 
 /** A template trait for parallel collections of type `ParIterable[T]`.
  *
@@ -416,8 +418,8 @@ self: ParIterableLike[T, Repr, Sequential] =>
    *  may be invoked arbitrary number of times.
    *
    *  For example, one might want to process some elements and then produce a `Set`. In this
-   *  case, `seqop` would process an element and append it to the list, while `combop`
-   *  would concatenate two lists from different partitions together. The initial value
+   *  case, `seqop` would process an element and append it to the set, while `combop`
+   *  would concatenate two sets from different partitions together. The initial value
    *  `z` would be an empty set.
    *
    *  {{{
@@ -586,6 +588,8 @@ self: ParIterableLike[T, Repr, Sequential] =>
       def doesShareCombiners = false
     }
   }
+
+  def withFilter(pred: T => Boolean): Repr = filter(pred)
 
   def filter(pred: T => Boolean): Repr = {
     tasksupport.executeAndWaitResult(new Filter(pred, combinerFactory, splitter) mapResult { _.resultWithTaskSupport })
@@ -839,14 +843,8 @@ self: ParIterableLike[T, Repr, Sequential] =>
     tasksupport.executeAndWaitResult(new ToParMap(combinerFactory(cbf), splitter)(ev) mapResult { _.resultWithTaskSupport })
   }
 
-  def view = new ParIterableView[T, Repr, Sequential] {
-    protected lazy val underlying = self.repr
-    protected[this] def viewIdentifier = ""
-    protected[this] def viewIdString = ""
-    override def seq = self.seq.view
-    def splitter = self.splitter
-    def size = splitter.remaining
-  }
+  @deprecated("Use .seq.view instead", "2.11.0")
+  def view = seq.view
 
   override def toArray[U >: T: ClassTag]: Array[U] = {
     val arr = new Array[U](size)

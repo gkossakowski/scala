@@ -96,7 +96,7 @@ abstract class TailCalls extends Transform {
       val failReason  = failReasons(ctx)
       val failPos     = failPositions(ctx)
 
-      unit.error(failPos, s"could not optimize @tailrec annotated $method: $failReason")
+      reporter.error(failPos, s"could not optimize @tailrec annotated $method: $failReason")
     }
 
     /** Has the label been accessed? Then its symbol is in this set. */
@@ -116,7 +116,7 @@ abstract class TailCalls extends Transform {
       def tailLabels: Set[Symbol]
 
       def enclosingType = method.enclClass.typeOfThis
-      def isEligible    = method.isEffectivelyFinal
+      def isEligible    = method.isEffectivelyFinalOrNotOverridden
       def isMandatory   = method.hasAnnotation(TailrecClass)
       def isTransformed = isEligible && accessed(label)
 
@@ -128,6 +128,7 @@ abstract class TailCalls extends Transform {
         logResult(msg)(method.newValue(nme.THIS, pos, SYNTHETIC) setInfo currentClass.typeOfThis)
       }
       override def toString = s"${method.name} tparams=$tparams tailPos=$tailPos label=$label label info=${label.info}"
+
     }
 
     object EmptyTailContext extends TailContext {
@@ -156,7 +157,7 @@ abstract class TailCalls extends Transform {
       private def mkLabel() = {
         val label     = method.newLabel(newTermName("_" + method.name), method.pos)
         val thisParam = method.newSyntheticValueParam(currentClass.typeOfThis)
-        label setInfo MethodType(thisParam :: method.tpe.params, method.tpe.finalResultType)
+        label setInfo MethodType(thisParam :: method.tpe.params, method.tpe_*.finalResultType)
         if (isEligible)
           label substInfo (method.tpe.typeParams, tparams)
 
@@ -184,6 +185,18 @@ abstract class TailCalls extends Transform {
     private var ctx: TailContext = EmptyTailContext
     private def noTailContext()  = new ClonedTailContext(ctx, tailPos = false)
     private def yesTailContext() = new ClonedTailContext(ctx, tailPos = true)
+
+
+    override def transformUnit(unit: CompilationUnit): Unit = {
+      try {
+        super.transformUnit(unit)
+      } finally {
+        // OPT clear these after each compilation unit
+        failPositions.clear()
+        failReasons.clear()
+        accessed.clear()
+      }
+    }
 
     /** Rewrite this tree to contain no tail recursive calls */
     def transform(tree: Tree, nctx: TailContext): Tree = {
@@ -218,12 +231,12 @@ abstract class TailCalls extends Transform {
          */
         def fail(reason: String) = {
           debuglog("Cannot rewrite recursive call at: " + fun.pos + " because: " + reason)
-          failReasons(ctx) = reason
+          if (ctx.isMandatory) failReasons(ctx) = reason
           treeCopy.Apply(tree, noTailTransform(target), transformArgs)
         }
         /* Position of failure is that of the tree being considered. */
         def failHere(reason: String) = {
-          failPositions(ctx) = fun.pos
+          if (ctx.isMandatory) failPositions(ctx) = fun.pos
           fail(reason)
         }
         def rewriteTailCall(recv: Tree): Tree = {
@@ -237,7 +250,8 @@ abstract class TailCalls extends Transform {
 
         if (!ctx.isEligible)            fail("it is neither private nor final so can be overridden")
         else if (!isRecursiveCall) {
-          if (receiverIsSuper)          failHere("it contains a recursive call targeting a supertype")
+          if (ctx.isMandatory && receiverIsSuper) // OPT expensive check, avoid unless we will actually report the error
+                                        failHere("it contains a recursive call targeting a supertype")
           else                          failHere(defaultReason)
         }
         else if (!matchesTypeArgs)      failHere("it is called recursively with different type arguments")
@@ -245,18 +259,23 @@ abstract class TailCalls extends Transform {
         else if (!receiverIsSame)       failHere("it changes type of 'this' on a polymorphic recursive call")
         else                            rewriteTailCall(receiver)
       }
+      
+      def isEligible(tree: DefDef) = {
+        val sym = tree.symbol
+        !(sym.hasAccessorFlag || sym.isConstructor)
+      }
 
       tree match {
         case ValDef(_, _, _, _) =>
           if (tree.symbol.isLazy && tree.symbol.hasAnnotation(TailrecClass))
-            unit.error(tree.pos, "lazy vals are not tailcall transformed")
+            reporter.error(tree.pos, "lazy vals are not tailcall transformed")
 
           super.transform(tree)
 
-        case dd @ DefDef(_, name, _, vparamss0, _, rhs0) if !dd.symbol.hasAccessorFlag =>
+        case dd @ DefDef(_, name, _, vparamss0, _, rhs0) if isEligible(dd) =>
           val newCtx = new DefDefTailContext(dd)
           if (newCtx.isMandatory && !(newCtx containsRecursiveCall rhs0))
-            unit.error(tree.pos, "@tailrec annotated method contains no recursive calls")
+            reporter.error(tree.pos, "@tailrec annotated method contains no recursive calls")
 
           debuglog(s"Considering $name for tailcalls, with labels in tailpos: ${newCtx.tailLabels}")
           val newRHS = transform(rhs0, newCtx)
@@ -309,11 +328,14 @@ abstract class TailCalls extends Transform {
           )
 
         case CaseDef(pat, guard, body) =>
+          // CaseDefs are already translated and guards were moved into the body.
+          // If this was not the case, guards would have to be transformed here as well.
+          assert(guard.isEmpty)
           deriveCaseDef(tree)(transform)
 
         case If(cond, thenp, elsep) =>
           treeCopy.If(tree,
-            cond,
+            noTailTransform(cond),
             transform(thenp),
             transform(elsep)
           )
@@ -344,7 +366,7 @@ abstract class TailCalls extends Transform {
           rewriteApply(tapply, fun, targs, vargs)
 
         case Apply(fun, args) if fun.symbol == Boolean_or || fun.symbol == Boolean_and =>
-          treeCopy.Apply(tree, fun, transformTrees(args))
+          treeCopy.Apply(tree, noTailTransform(fun), transformTrees(args))
 
         // this is to detect tailcalls in translated matches
         // it's a one-argument call to a label that is in a tailposition and that looks like label(x) {x}

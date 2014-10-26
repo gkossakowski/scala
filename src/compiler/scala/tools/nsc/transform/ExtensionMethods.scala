@@ -127,9 +127,9 @@ abstract class ExtensionMethods extends Transform with TypingTransformers {
 
     def checkNonCyclic(pos: Position, seen: Set[Symbol], clazz: Symbol): Unit =
       if (seen contains clazz)
-        unit.error(pos, "value class may not unbox to itself")
+        reporter.error(pos, "value class may not unbox to itself")
       else {
-        val unboxed = erasure.underlyingOfValueClass(clazz).typeSymbol
+        val unboxed = definitions.underlyingOfValueClass(clazz).typeSymbol
         if (unboxed.isDerivedValueClass) checkNonCyclic(pos, seen + clazz, unboxed)
       }
 
@@ -191,6 +191,9 @@ abstract class ExtensionMethods extends Transform with TypingTransformers {
             checkNonCyclic(currentOwner.pos, Set(), currentOwner) */
             extensionDefs(currentOwner.companionModule) = new mutable.ListBuffer[Tree]
             currentOwner.primaryConstructor.makeNotPrivate(NoSymbol)
+            // SI-7859 make param accessors accessible so the erasure can generate unbox operations.
+            val paramAccessors = currentOwner.info.decls.filter(sym => sym.isParamAccessor && sym.isMethod)
+            paramAccessors.foreach(_.makeNotPrivate(currentOwner))
             super.transform(tree)
           } else if (currentOwner.isStaticOwner) {
             super.transform(tree)
@@ -205,7 +208,7 @@ abstract class ExtensionMethods extends Transform with TypingTransformers {
           def makeExtensionMethodSymbol = {
             val extensionName = extensionNames(origMeth).head.toTermName
             val extensionMeth = (
-              companion.moduleClass.newMethod(extensionName, origMeth.pos, origMeth.flags & ~OVERRIDE & ~PROTECTED | FINAL)
+              companion.moduleClass.newMethod(extensionName, tree.pos.focus, origMeth.flags & ~OVERRIDE & ~PROTECTED | FINAL)
                 setAnnotations origMeth.annotations
             )
             origMeth.removeAnnotation(TailrecClass) // it's on the extension method, now.
@@ -230,9 +233,14 @@ abstract class ExtensionMethods extends Transform with TypingTransformers {
               .changeOwner(origMeth -> extensionMeth)
             new SubstututeRecursion(origMeth, extensionMeth, unit).transform(tree)
           }
+          val castBody =
+            if (extensionBody.tpe <:< extensionMono.finalResultType)
+              extensionBody
+            else
+              gen.mkCastPreservingAnnotations(extensionBody, extensionMono.finalResultType) // SI-7818 e.g. mismatched existential skolems
 
           // Record the extension method. Later, in `Extender#transformStats`, these will be added to the companion object.
-          extensionDefs(companion) += atPos(tree.pos)(DefDef(extensionMeth, extensionBody))
+          extensionDefs(companion) += DefDef(extensionMeth, castBody)
 
           // These three lines are assembling Foo.bar$extension[T1, T2, ...]($this)
           // which leaves the actual argument application for extensionCall.
@@ -283,13 +291,12 @@ abstract class ExtensionMethods extends Transform with TypingTransformers {
       //         object C   { def meth$extension[M, C](this$: C[C], a: A)
       //                        = { meth$extension[M', C']({ <expr>: C[C'] })(a1) } }
       case treeInfo.Applied(sel @ Select(qual, _), targs, argss) if sel.symbol == origMeth =>
-        import gen.CODE._
         localTyper.typedPos(tree.pos) {
           val allArgss = List(qual) :: argss
           val origThis = extensionMeth.owner.companionClass
           val baseType = qual.tpe.baseType(origThis)
           val allTargs = targs.map(_.tpe) ::: baseType.typeArgs
-          val fun = gen.mkAttributedTypeApply(THIS(extensionMeth.owner), extensionMeth, allTargs)
+          val fun = gen.mkAttributedTypeApply(gen.mkAttributedThis(extensionMeth.owner), extensionMeth, allTargs)
           allArgss.foldLeft(fun)(Apply(_, _))
         }
       case _ => super.transform(tree)

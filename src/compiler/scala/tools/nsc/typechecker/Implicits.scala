@@ -17,7 +17,7 @@ import scala.collection.{ mutable, immutable }
 import mutable.{ LinkedHashMap, ListBuffer }
 import scala.util.matching.Regex
 import symtab.Flags._
-import scala.reflect.internal.util.Statistics
+import scala.reflect.internal.util.{TriState, Statistics}
 import scala.language.implicitConversions
 
 /** This trait provides methods to find various kinds of implicits.
@@ -71,14 +71,15 @@ trait Implicits {
       typingStack.printTyping(tree, "typing implicit: %s %s".format(tree, context.undetparamsString))
     val implicitSearchContext = context.makeImplicit(reportAmbiguous)
     val result = new ImplicitSearch(tree, pt, isView, implicitSearchContext, pos).bestImplicit
-    if (result.isFailure && saveAmbiguousDivergent && implicitSearchContext.hasErrors) {
-      context.updateBuffer(implicitSearchContext.reportBuffer.errors.collect {
-        case dte: DivergentImplicitTypeError => dte
-        case ate: AmbiguousImplicitTypeError => ate
-      })
-      debuglog("update buffer: " + implicitSearchContext.reportBuffer.errors)
-    }
-    context.undetparams = context.undetparams filterNot result.subst.from.contains
+
+    if (result.isFailure && saveAmbiguousDivergent && implicitSearchContext.reporter.hasErrors)
+      implicitSearchContext.reporter.propagateImplicitTypeErrorsTo(context.reporter)
+
+    // SI-7944 undetermined type parameters that result from inference within typedImplicit land in
+    //         `implicitSearchContext.undetparams`, *not* in `context.undetparams`
+    //         Here, we copy them up to parent context (analogously to the way the errors are copied above),
+    //         and then filter out any which *were* inferred and are part of the substitutor in the implicit search result.
+    context.undetparams = ((context.undetparams ++ result.undetparams) filterNot result.subst.from.contains).distinct
 
     if (Statistics.canEnable) Statistics.stopTimer(implicitNanos, start)
     if (Statistics.canEnable) Statistics.stopCounter(rawTypeImpl, rawTypeStart)
@@ -95,7 +96,7 @@ trait Implicits {
     def wrapper(inference: => SearchResult) = wrapper1(inference)
     val result = wrapper(inferImplicit(tree, pt, reportAmbiguous = true, isView = isView, context = context, saveAmbiguousDivergent = !silent, pos = pos))
     if (result.isFailure && !silent) {
-      val err = context.firstError
+      val err = context.reporter.firstError
       val errPos = err.map(_.errPos).getOrElse(pos)
       val errMsg = err.map(_.errMsg).getOrElse("implicit search has failed. to find out the reason, turn on -Xlog-implicits")
       onError(errPos, errMsg)
@@ -133,10 +134,6 @@ trait Implicits {
   private val improvesCache = perRunCaches.newMap[(ImplicitInfo, ImplicitInfo), Boolean]()
   private val implicitSearchId = { var id = 1 ; () => try id finally id += 1 }
 
-  private def isInvalidConversionTarget(tpe: Type): Boolean = tpe match {
-    case Function1(_, out) => AnyRefClass.tpe <:< out
-    case _                 => false
-  }
   private def isInvalidConversionSource(tpe: Type): Boolean = tpe match {
     case Function1(in, _) => in <:< NullClass.tpe
     case _                => false
@@ -162,8 +159,9 @@ trait Implicits {
    *  @param  tree    The tree representing the implicit
    *  @param  subst   A substituter that represents the undetermined type parameters
    *                  that were instantiated by the winning implicit.
+   *  @param undetparams undeterminted type parameters
    */
-  class SearchResult(val tree: Tree, val subst: TreeTypeSubstituter) {
+  class SearchResult(val tree: Tree, val subst: TreeTypeSubstituter, val undetparams: List[Symbol]) {
     override def toString = "SearchResult(%s, %s)".format(tree,
       if (subst.isEmpty) "" else subst)
 
@@ -173,16 +171,16 @@ trait Implicits {
     final def isSuccess    = !isFailure
   }
 
-  lazy val SearchFailure = new SearchResult(EmptyTree, EmptyTreeTypeSubstituter) {
+  lazy val SearchFailure = new SearchResult(EmptyTree, EmptyTreeTypeSubstituter, Nil) {
     override def isFailure = true
   }
 
-  lazy val DivergentSearchFailure = new SearchResult(EmptyTree, EmptyTreeTypeSubstituter) {
+  lazy val DivergentSearchFailure = new SearchResult(EmptyTree, EmptyTreeTypeSubstituter, Nil) {
     override def isFailure   = true
     override def isDivergent = true
   }
 
-  lazy val AmbiguousSearchFailure = new SearchResult(EmptyTree, EmptyTreeTypeSubstituter) {
+  lazy val AmbiguousSearchFailure = new SearchResult(EmptyTree, EmptyTreeTypeSubstituter, Nil) {
     override def isFailure          = true
     override def isAmbiguousFailure = true
   }
@@ -194,6 +192,7 @@ trait Implicits {
    */
   class ImplicitInfo(val name: Name, val pre: Type, val sym: Symbol) {
     private var tpeCache: Type = null
+    private var isCyclicOrErroneousCache: TriState = TriState.Unknown
 
     /** Computes member type of implicit from prefix `pre` (cached). */
     def tpe: Type = {
@@ -201,7 +200,12 @@ trait Implicits {
       tpeCache
     }
 
-    def isCyclicOrErroneous =
+    def isCyclicOrErroneous: Boolean = {
+      if (!isCyclicOrErroneousCache.isKnown) isCyclicOrErroneousCache = computeIsCyclicOrErroneous
+      isCyclicOrErroneousCache.booleanValue
+    }
+
+    private[this] final def computeIsCyclicOrErroneous =
       try sym.hasFlag(LOCKED) || containsError(tpe)
       catch { case _: CyclicReference => true }
 
@@ -216,7 +220,8 @@ trait Implicits {
       case NullaryMethodType(restpe) =>
         containsError(restpe)
       case mt @ MethodType(_, restpe) =>
-        (mt.paramTypes exists typeIsError) || containsError(restpe)
+        // OPT avoiding calling `mt.paramTypes` which creates a new list.
+        (mt.params exists symTypeIsError) || containsError(restpe)
       case _ =>
         tp.isError
     }
@@ -299,7 +304,10 @@ trait Implicits {
    */
   object Function1 {
     val Sym = FunctionClass(1)
-    def unapply(tp: Type) = tp baseType Sym match {
+    // It is tempting to think that this should be inspecting "tp baseType Sym"
+    // rather than tp. See test case run/t8280 and the commit message which
+    // accompanies it for explanation why that isn't done.
+    def unapply(tp: Type) = tp match {
       case TypeRef(_, Sym, arg1 :: arg2 :: _) => Some((arg1, arg2))
       case _                                  => None
     }
@@ -316,7 +324,7 @@ trait Implicits {
    */
   class ImplicitSearch(tree: Tree, pt: Type, isView: Boolean, context0: Context, pos0: Position = NoPosition) extends Typer(context0) with ImplicitsContextErrors {
     val searchId = implicitSearchId()
-    private def typingLog(what: String, msg: String) =
+    private def typingLog(what: String, msg: => String) =
       typingStack.printTyping(tree, f"[search #$searchId] $what $msg")
 
     import infer._
@@ -325,6 +333,9 @@ trait Implicits {
     /** The type parameters to instantiate */
     val undetParams = if (isView) Nil else context.outer.undetparams
     val wildPt = approximate(pt)
+
+    private val runDefintions = currentRun.runDefinitions
+    import runDefintions._
 
     def undet_s = if (undetParams.isEmpty) "" else undetParams.mkString(" inferring ", ", ", "")
     def tree_s = typeDebug ptTree tree
@@ -374,11 +385,11 @@ trait Implicits {
      */
     private def dominates(dtor: Type, dted: Type): Boolean = {
       def core(tp: Type): Type = tp.dealiasWiden match {
-        case RefinedType(parents, defs) => intersectionType(parents map core, tp.typeSymbol.owner)
-        case AnnotatedType(annots, tp, selfsym) => core(tp)
-        case ExistentialType(tparams, result) => core(result).subst(tparams, tparams map (t => core(t.info.bounds.hi)))
-        case PolyType(tparams, result) => core(result).subst(tparams, tparams map (t => core(t.info.bounds.hi)))
-        case _ => tp
+        case RefinedType(parents, defs)         => intersectionType(parents map core, tp.typeSymbol.owner)
+        case AnnotatedType(annots, tp)          => core(tp)
+        case ExistentialType(tparams, result)   => core(result).subst(tparams, tparams map (t => core(t.info.bounds.hi)))
+        case PolyType(tparams, result)          => core(result).subst(tparams, tparams map (t => core(t.info.bounds.hi)))
+        case _                                  => tp
       }
       def stripped(tp: Type): Type = {
         // `t.typeSymbol` returns the symbol of the normalized type. If that normalized type
@@ -387,23 +398,18 @@ trait Implicits {
         val syms = for (t <- tp; if t.typeSymbol.isTypeParameter) yield t.typeSymbol
         deriveTypeWithWildcards(syms.distinct)(tp)
       }
-      def sum(xs: List[Int]) = (0 /: xs)(_ + _)
-      def complexity(tp: Type): Int = tp.dealiasWiden match {
-        case NoPrefix =>
-          0
-        case SingleType(pre, sym) =>
-          if (sym.isPackage) 0 else complexity(tp.dealiasWiden)
-        case TypeRef(pre, sym, args) =>
-          complexity(pre) + sum(args map complexity) + 1
-        case RefinedType(parents, _) =>
-          sum(parents map complexity) + 1
-        case _ =>
-          1
+      def complexity(tp: Type): Int = tp.dealias match {
+        case NoPrefix                => 0
+        case SingleType(pre, sym)    => if (sym.hasPackageFlag) 0 else complexity(tp.dealiasWiden)
+        case ThisType(sym)           => if (sym.hasPackageFlag) 0 else 1
+        case TypeRef(pre, sym, args) => complexity(pre) + (args map complexity).sum + 1
+        case RefinedType(parents, _) => (parents map complexity).sum + 1
+        case _                       => 1
       }
       def overlaps(tp1: Type, tp2: Type): Boolean = (tp1, tp2) match {
         case (RefinedType(parents, _), _) => parents exists (overlaps(_, tp2))
         case (_, RefinedType(parents, _)) => parents exists (overlaps(tp1, _))
-        case _ => tp1.typeSymbol == tp2.typeSymbol
+        case _                            => tp1.typeSymbol == tp2.typeSymbol
       }
       val dtor1 = stripped(core(dtor))
       val dted1 = stripped(core(dted))
@@ -417,11 +423,11 @@ trait Implicits {
      *  expected type.
      *  Detect infinite search trees for implicits.
      *
-     *  @param info    The given implicit info describing the implicit definition
-     *  @param isLocal Is the implicit in the local scope of the call site?
-     *  @pre           `info.tpe` does not contain an error
+     *  @param info              The given implicit info describing the implicit definition
+     *  @param isLocalToCallsite Is the implicit in the local scope of the call site?
+     *  @pre `info.tpe` does not contain an error
      */
-    private def typedImplicit(info: ImplicitInfo, ptChecked: Boolean, isLocal: Boolean): SearchResult = {
+    private def typedImplicit(info: ImplicitInfo, ptChecked: Boolean, isLocalToCallsite: Boolean): SearchResult = {
       // SI-7167 let implicit macros decide what amounts for a divergent implicit search
       // imagine a macro writer which wants to synthesize a complex implicit Complex[T] by making recursive calls to Complex[U] for its parts
       // e.g. we have `class Foo(val bar: Bar)` and `class Bar(val x: Int)`
@@ -442,7 +448,7 @@ trait Implicits {
            try {
              context.openImplicits = OpenImplicit(info, pt, tree) :: context.openImplicits
              // println("  "*context.openImplicits.length+"typed implicit "+info+" for "+pt) //@MDEBUG
-             val result = typedImplicit0(info, ptChecked, isLocal)
+             val result = typedImplicit0(info, ptChecked, isLocalToCallsite)
              if (result.isDivergent) {
                //println("DivergentImplicit for pt:"+ pt +", open implicits:"+context.openImplicits) //@MDEBUG
                if (context.openImplicits.tail.isEmpty && !pt.isErroneous)
@@ -559,31 +565,31 @@ trait Implicits {
       // side is a class, else we may not know enough.
       case tr1 @ TypeRef(_, sym1, _) if sym1.isClass =>
         tp2.dealiasWiden match {
-          case TypeRef(_, sym2, _)         => sym2.isClass && !(sym1 isWeakSubClass sym2)
+          case TypeRef(_, sym2, _)         => ((sym1 eq ByNameParamClass) != (sym2 eq ByNameParamClass)) || (sym2.isClass && !(sym1 isWeakSubClass sym2))
           case RefinedType(parents, decls) => decls.nonEmpty && tr1.member(decls.head.name) == NoSymbol
           case _                           => false
         }
       case _ => false
     }
 
-    private def typedImplicit0(info: ImplicitInfo, ptChecked: Boolean, isLocal: Boolean): SearchResult = {
+    private def typedImplicit0(info: ImplicitInfo, ptChecked: Boolean, isLocalToCallsite: Boolean): SearchResult = {
       if (Statistics.canEnable) Statistics.incCounter(plausiblyCompatibleImplicits)
       val ok = ptChecked || matchesPt(info) && {
-        def word = if (isLocal) "local " else ""
+        def word = if (isLocalToCallsite) "local " else ""
         typingLog("match", s"$word$info")
         true
       }
-      if (ok) typedImplicit1(info, isLocal) else SearchFailure
+      if (ok) typedImplicit1(info, isLocalToCallsite) else SearchFailure
     }
 
-    private def typedImplicit1(info: ImplicitInfo, isLocal: Boolean): SearchResult = {
+    private def typedImplicit1(info: ImplicitInfo, isLocalToCallsite: Boolean): SearchResult = {
       if (Statistics.canEnable) Statistics.incCounter(matchingImplicits)
 
-      val itree = atPos(pos.focus) {
-        // workaround for deficient context provided by ModelFactoryImplicitSupport#makeImplicitConstraints
-        val isScalaDoc = context.tree == EmptyTree
+      // workaround for deficient context provided by ModelFactoryImplicitSupport#makeImplicitConstraints
+      val isScalaDoc = context.tree == EmptyTree
 
-        if (isLocal && !isScalaDoc) {
+      val itree0 = atPos(pos.focus) {
+        if (isLocalToCallsite && !isScalaDoc) {
           // SI-4270 SI-5376 Always use an unattributed Ident for implicits in the local scope,
           // rather than an attributed Select, to detect shadowing.
           Ident(info.name)
@@ -594,21 +600,39 @@ trait Implicits {
           Select(gen.mkAttributedQualifier(info.pre), implicitMemberName)
         }
       }
-      typingLog("considering", typeDebug.ptTree(itree))
+      val itree1 = if (isBlackbox(info.sym)) suppressMacroExpansion(itree0) else itree0
+      typingLog("considering", typeDebug.ptTree(itree1))
 
-      def fail(reason: String): SearchResult = failure(itree, reason)
-      def fallback = typed1(itree, EXPRmode, wildPt)
+      def fail(reason: String): SearchResult = failure(itree0, reason)
+      def fallback = typed1(itree1, EXPRmode, wildPt)
       try {
-        val itree1 = if (!isView) fallback else pt match {
+        val itree2 = if (!isView) fallback else pt match {
           case Function1(arg1, arg2) =>
             typed1(
-              atPos(itree.pos)(Apply(itree, List(Ident("<argument>") setType approximate(arg1)))),
+              atPos(itree0.pos)(Apply(itree1, List(Ident("<argument>") setType approximate(arg1)))),
               EXPRmode,
               approximate(arg2)
-            )
+            ) match {
+              // try to infer implicit parameters immediately in order to:
+              //   1) guide type inference for implicit views
+              //   2) discard ineligible views right away instead of risking spurious ambiguous implicits
+              //
+              // this is an improvement of the state of the art that brings consistency to implicit resolution rules
+              // (and also helps fundep materialization to be applicable to implicit views)
+              //
+              // there's one caveat though. we need to turn this behavior off for scaladoc
+              // because scaladoc usually doesn't know the entire story
+              // and is just interested in views that are potentially applicable
+              // for instance, if we have `class C[T]` and `implicit def conv[T: Numeric](c: C[T]) = ???`
+              // then Scaladoc will give us something of type `C[T]`, and it would like to know
+              // that `conv` is potentially available under such and such conditions
+              case tree if isImplicitMethodType(tree.tpe) && !isScalaDoc =>
+                applyImplicitArgs(tree)
+              case tree => tree
+            }
           case _ => fallback
         }
-        context.firstError match { // using match rather than foreach to avoid non local return.
+        context.reporter.firstError match { // using match rather than foreach to avoid non local return.
           case Some(err) =>
             log("implicit adapt failed: " + err.errMsg)
             return fail(err.errMsg)
@@ -617,10 +641,10 @@ trait Implicits {
 
         if (Statistics.canEnable) Statistics.incCounter(typedImplicits)
 
-        val itree2 = if (isView) (itree1: @unchecked) match { case Apply(fun, _) => fun }
-                     else adapt(itree1, EXPRmode, wildPt)
+        val itree3 = if (isView) treeInfo.dissectApplied(itree2).callee
+                     else adapt(itree2, EXPRmode, wildPt)
 
-        typingStack.showAdapt(itree, itree2, pt, context)
+        typingStack.showAdapt(itree0, itree3, pt, context)
 
         def hasMatchingSymbol(tree: Tree): Boolean = (tree.symbol == info.sym) || {
           tree match {
@@ -631,24 +655,26 @@ trait Implicits {
           }
         }
 
-        if (context.hasErrors)
-          fail("hasMatchingSymbol reported error: " + context.firstError.get.errMsg)
-        else if (isLocal && !hasMatchingSymbol(itree1))
+        if (context.reporter.hasErrors)
+          fail("hasMatchingSymbol reported error: " + context.reporter.firstError.get.errMsg)
+        else if (itree3.isErroneous)
+          fail("error typechecking implicit candidate")
+        else if (isLocalToCallsite && !hasMatchingSymbol(itree2))
           fail("candidate implicit %s is shadowed by %s".format(
-            info.sym.fullLocationString, itree1.symbol.fullLocationString))
+            info.sym.fullLocationString, itree2.symbol.fullLocationString))
         else {
           val tvars = undetParams map freshVar
           def ptInstantiated = pt.instantiateTypeParams(undetParams, tvars)
 
-          if (matchesPt(itree2.tpe, ptInstantiated, undetParams)) {
+          if (matchesPt(itree3.tpe, ptInstantiated, undetParams)) {
             if (tvars.nonEmpty)
               typingLog("solve", ptLine("tvars" -> tvars, "tvars.constr" -> tvars.map(_.constr)))
 
-            val targs = solvedTypes(tvars, undetParams, undetParams map varianceInType(pt), upper = false, lubDepth(itree2.tpe :: pt :: Nil))
+            val targs = solvedTypes(tvars, undetParams, undetParams map varianceInType(pt), upper = false, lubDepth(itree3.tpe :: pt :: Nil))
 
             // #2421: check that we correctly instantiated type parameters outside of the implicit tree:
-            checkBounds(itree2, NoPrefix, NoSymbol, undetParams, targs, "inferred ")
-            context.firstError match {
+            checkBounds(itree3, NoPrefix, NoSymbol, undetParams, targs, "inferred ")
+            context.reporter.firstError match {
               case Some(err) =>
                 return fail("type parameters weren't correctly instantiated outside of the implicit tree: " + err.errMsg)
               case None      =>
@@ -663,7 +689,7 @@ trait Implicits {
               if (okParams.isEmpty) EmptyTreeTypeSubstituter
               else {
                 val subst = new TreeTypeSubstituter(okParams, okArgs)
-                subst traverse itree2
+                subst traverse itree3
                 notifyUndetparamsInferred(okParams, okArgs)
                 subst
               }
@@ -681,23 +707,23 @@ trait Implicits {
             // This is just called for the side effect of error detection,
             // see SI-6966 to see what goes wrong if we use the result of this
             // as the SearchResult.
-            itree2 match {
-              case TypeApply(fun, args)           => typedTypeApply(itree2, EXPRmode, fun, args)
-              case Apply(TypeApply(fun, args), _) => typedTypeApply(itree2, EXPRmode, fun, args) // t2421c
+            itree3 match {
+              case TypeApply(fun, args)           => typedTypeApply(itree3, EXPRmode, fun, args)
+              case Apply(TypeApply(fun, args), _) => typedTypeApply(itree3, EXPRmode, fun, args) // t2421c
               case t                              => t
             }
 
-            context.firstError match {
+            context.reporter.firstError match {
               case Some(err) =>
                 fail("typing TypeApply reported errors for the implicit tree: " + err.errMsg)
               case None      =>
-                val result = new SearchResult(itree2, subst)
+                val result = new SearchResult(unsuppressMacroExpansion(itree3), subst, context.undetparams)
                 if (Statistics.canEnable) Statistics.incCounter(foundImplicits)
                 typingLog("success", s"inferred value of type $ptInstantiated is $result")
                 result
             }
           }
-          else fail("incompatible: %s does not match expected type %s".format(itree2.tpe, ptInstantiated))
+          else fail("incompatible: %s does not match expected type %s".format(itree3.tpe, ptInstantiated))
         }
       }
       catch {
@@ -748,12 +774,12 @@ trait Implicits {
 
     /** Prune ImplicitInfos down to either all the eligible ones or the best one.
      *
-     *  @param  iss       list of list of infos
-     *  @param  isLocal   if true, `iss` represents in-scope implicits, which must respect the normal rules of
-     *                    shadowing. The head of the list `iss` must represent implicits from the closest
-     *                    enclosing scope, and so on.
+     *  @param  iss                list of list of infos
+     *  @param  isLocalToCallsite  if true, `iss` represents in-scope implicits, which must respect the normal rules of
+     *                             shadowing. The head of the list `iss` must represent implicits from the closest
+     *                             enclosing scope, and so on.
      */
-    class ImplicitComputation(iss: Infoss, isLocal: Boolean) {
+    class ImplicitComputation(iss: Infoss, isLocalToCallsite: Boolean) {
       abstract class Shadower {
         def addInfos(infos: Infos)
         def isShadowed(name: Name): Boolean
@@ -763,7 +789,7 @@ trait Implicits {
         final class LocalShadower extends Shadower {
           val shadowed = util.HashSet[Name](512)
           def addInfos(infos: Infos) {
-            shadowed addEntries infos.map(_.name)
+            infos.foreach(i => shadowed.addEntry(i.name))
           }
           def isShadowed(name: Name) = shadowed(name)
         }
@@ -772,15 +798,14 @@ trait Implicits {
           def addInfos(infos: Infos) {}
           def isShadowed(name: Name) = false
         }
-        if (isLocal) new LocalShadower else NoShadower
+        if (isLocalToCallsite) new LocalShadower else NoShadower
       }
 
       private var best: SearchResult = SearchFailure
 
       private def isIneligible(info: ImplicitInfo) = (
            info.isCyclicOrErroneous
-        || isView && isPredefMemberNamed(info.sym, nme.conforms)
-        || shadower.isShadowed(info.name)
+        || isView && (info.sym eq Predef_conforms) // as an implicit conversion, Predef.$conforms is a no-op, so exclude it
         || (!context.macrosEnabled && info.sym.isTermMacro)
       )
 
@@ -789,6 +814,7 @@ trait Implicits {
       def survives(info: ImplicitInfo) = (
            !isIneligible(info)                      // cyclic, erroneous, shadowed, or specially excluded
         && isPlausiblyCompatible(info.tpe, wildPt)  // optimization to avoid matchesPt
+        && !shadower.isShadowed(info.name)          // OPT rare, only check for plausible candidates
         && matchesPt(info)                          // stable and matches expected type
       )
       /** The implicits that are not valid because they come later in the source and
@@ -804,19 +830,39 @@ trait Implicits {
        *  so that if there is a best candidate it can still be selected.
        */
       object DivergentImplicitRecovery {
-        // symbol of the implicit that caused the divergence.
-        // Initially null, will be saved on first diverging expansion.
-        private var implicitSym: Symbol    = _
-        private var countdown: Int = 1
+        private var divergentError: Option[DivergentImplicitTypeError] = None
 
-        def sym: Symbol = implicitSym
-        def apply(search: SearchResult, i: ImplicitInfo): SearchResult =
-          if (search.isDivergent && countdown > 0) {
-            countdown -= 1
-            implicitSym = i.sym
-            log(s"discarding divergent implicit $implicitSym during implicit search")
+        private def saveDivergent(err: DivergentImplicitTypeError) {
+          if (divergentError.isEmpty) divergentError = Some(err)
+        }
+
+        def issueSavedDivergentError() {
+          divergentError foreach (err => context.issue(err))
+        }
+
+        def apply(search: SearchResult, i: ImplicitInfo, errors: Seq[AbsTypeError]): SearchResult = {
+          // A divergent error from a nested implicit search will be found in `errors`. Stash that
+          // aside to be re-issued if this implicit search fails.
+          errors.collectFirst { case err: DivergentImplicitTypeError => err } foreach saveDivergent
+
+          if (search.isDivergent && divergentError.isEmpty) {
+            // Divergence triggered by `i` at this level of the implicit serach. We haven't
+            // seen divergence so far, we won't issue this error just yet, and instead temporarily
+            // treat `i` as a failed candidate.
+            saveDivergent(DivergentImplicitTypeError(tree, pt, i.sym))
+            log(s"discarding divergent implicit ${i.sym} during implicit search")
             SearchFailure
-          } else search
+          } else {
+            if (search.isFailure) {
+              // Discard the divergentError we saved (if any), as well as all errors that are not of type DivergentImplicitTypeError
+              // We don't want errors that occur while checking the implicit info
+              // to influence the check of further infos, but we should retain divergent implicit errors
+              // (except for the one we already squirreled away)
+              context.reporter.retainDivergentErrorsExcept(divergentError.getOrElse(null))
+            }
+            search
+          }
+        }
       }
 
       /** Sorted list of eligible implicits.
@@ -840,37 +886,39 @@ trait Implicits {
        *   - if it matches, forget about all others it improves upon
        */
       @tailrec private def rankImplicits(pending: Infos, acc: Infos): Infos = pending match {
-        case Nil      => acc
-        case i :: is  =>
-          DivergentImplicitRecovery(typedImplicit(i, ptChecked = true, isLocal), i) match {
-            case sr if sr.isDivergent =>
-              Nil
-            case sr if sr.isFailure =>
-              // We don't want errors that occur during checking implicit info
-              // to influence the check of further infos.
-              context.reportBuffer.retainErrors {
-                case err: DivergentImplicitTypeError => true
+        case Nil                          => acc
+        case firstPending :: otherPending =>
+          def firstPendingImproves(alt: ImplicitInfo) =
+            firstPending == alt || (
+              try improves(firstPending, alt)
+              catch {
+                case e: CyclicReference =>
+                  debugwarn(s"Discarding $firstPending during implicit search due to cyclic reference.")
+                  true
               }
-              rankImplicits(is, acc)
-            case newBest        =>
-              best = newBest
-              val newPending = undoLog undo {
-                is filterNot (alt => alt == i || {
-                  try improves(i, alt)
-                  catch {
-                    case e: CyclicReference =>
-                      debugwarn(s"Discarding $i during implicit search due to cyclic reference")
-                      true
-                  }
-                })
+            )
+
+          val typedFirstPending = typedImplicit(firstPending, ptChecked = true, isLocalToCallsite)
+
+          // Pass the errors to `DivergentImplicitRecovery` so that it can note
+          // the first `DivergentImplicitTypeError` that is being propagated
+          // from a nested implicit search; this one will be
+          // re-issued if this level of the search fails.
+          DivergentImplicitRecovery(typedFirstPending, firstPending, context.reporter.errors) match {
+            case sr if sr.isDivergent => Nil
+            case sr if sr.isFailure   => rankImplicits(otherPending, acc)
+            case newBest              =>
+              best = newBest // firstPending is our new best, since we already pruned last time around:
+              val pendingImprovingBest = undoLog undo {
+                otherPending filterNot firstPendingImproves
               }
-              rankImplicits(newPending, i :: acc)
+              rankImplicits(pendingImprovingBest, firstPending :: acc)
           }
       }
 
       /** Returns all eligible ImplicitInfos and their SearchResults in a map.
        */
-      def findAll() = mapFrom(eligible)(typedImplicit(_, ptChecked = false, isLocal))
+      def findAll() = mapFrom(eligible)(typedImplicit(_, ptChecked = false, isLocalToCallsite))
 
       /** Returns the SearchResult of the best match.
        */
@@ -892,12 +940,9 @@ trait Implicits {
         }
 
         if (best.isFailure) {
-          /* If there is no winner, and we witnessed and caught divergence,
-           * now we can throw it for the error message.
-           */
-          if (DivergentImplicitRecovery.sym != null) {
-            DivergingImplicitExpansionError(tree, pt, DivergentImplicitRecovery.sym)(context)
-          }
+          // If there is no winner, and we witnessed and recorded a divergence error,
+          // our recovery attempt has failed, so we must now issue it.
+          DivergentImplicitRecovery.issueSavedDivergentError()
 
           if (invalidImplicits.nonEmpty)
             setAddendum(pos, () =>
@@ -912,15 +957,15 @@ trait Implicits {
     /** Computes from a list of lists of implicit infos a map which takes
      *  infos which are applicable for given expected type `pt` to their attributed trees.
      *
-     *  @param iss            The given list of lists of implicit infos
-     *  @param isLocal        Is implicit definition visible without prefix?
-     *                        If this is the case then symbols in preceding lists shadow
-     *                        symbols of the same name in succeeding lists.
-     *  @return               map from infos to search results
+     *  @param iss               The given list of lists of implicit infos
+     *  @param isLocalToCallsite Is implicit definition visible without prefix?
+     *                           If this is the case then symbols in preceding lists shadow
+     *                           symbols of the same name in succeeding lists.
+     *  @return                  map from infos to search results
      */
-    def applicableInfos(iss: Infoss, isLocal: Boolean): Map[ImplicitInfo, SearchResult] = {
+    def applicableInfos(iss: Infoss, isLocalToCallsite: Boolean): Map[ImplicitInfo, SearchResult] = {
       val start       = if (Statistics.canEnable) Statistics.startCounter(subtypeAppInfos) else null
-      val computation = new ImplicitComputation(iss, isLocal) { }
+      val computation = new ImplicitComputation(iss, isLocalToCallsite) { }
       val applicable  = computation.findAll()
 
       if (Statistics.canEnable) Statistics.stopCounter(subtypeAppInfos, start)
@@ -931,14 +976,14 @@ trait Implicits {
      *  If found return a search result with a tree from found implicit info
      *  which is typed with expected type `pt`. Otherwise return SearchFailure.
      *
-     *  @param implicitInfoss The given list of lists of implicit infos
-     *  @param isLocal        Is implicit definition visible without prefix?
-     *                        If this is the case then symbols in preceding lists shadow
-     *                        symbols of the same name in succeeding lists.
+     *  @param implicitInfoss    The given list of lists of implicit infos
+     *  @param isLocalToCallsite Is implicit definition visible without prefix?
+     *                           If this is the case then symbols in preceding lists shadow
+     *                           symbols of the same name in succeeding lists.
      */
-    def searchImplicit(implicitInfoss: Infoss, isLocal: Boolean): SearchResult =
+    def searchImplicit(implicitInfoss: Infoss, isLocalToCallsite: Boolean): SearchResult =
       if (implicitInfoss.forall(_.isEmpty)) SearchFailure
-      else new ImplicitComputation(implicitInfoss, isLocal) findBest()
+      else new ImplicitComputation(implicitInfoss, isLocalToCallsite) findBest()
 
     /** Produce an implicict info map, i.e. a map from the class symbols C of all parts of this type to
      *  the implicit infos in the companion objects of these class symbols C.
@@ -1032,7 +1077,7 @@ trait Implicits {
             getParts(restpe)
           case RefinedType(ps, _) =>
             for (p <- ps) getParts(p)
-          case AnnotatedType(_, t, _) =>
+          case AnnotatedType(_, t) =>
             getParts(t)
           case ExistentialType(_, t) =>
             getParts(t)
@@ -1078,13 +1123,6 @@ trait Implicits {
       }
     }
 
-    private def TagSymbols =  TagMaterializers.keySet
-    private val TagMaterializers = Map[Symbol, Symbol](
-      ClassTagClass    -> materializeClassTag,
-      WeakTypeTagClass -> materializeWeakTypeTag,
-      TypeTagClass     -> materializeTypeTag
-    )
-
     /** Creates a tree will produce a tag of the requested flavor.
       * An EmptyTree is returned if materialization fails.
       */
@@ -1103,9 +1141,9 @@ trait Implicits {
 
         try {
           val tree1 = typedPos(pos.focus)(arg)
-          context.firstError match {
+          context.reporter.firstError match {
             case Some(err) => processMacroExpansionError(err.errPos, err.errMsg)
-            case None      => new SearchResult(tree1, EmptyTreeTypeSubstituter)
+            case None      => new SearchResult(tree1, EmptyTreeTypeSubstituter, Nil)
           }
         } catch {
           case ex: TypeError =>
@@ -1124,7 +1162,7 @@ trait Implicits {
             gen.mkAttributedThis(thisSym)
           case _ =>
             // if `pre` is not a PDT, e.g. if someone wrote
-            //   implicitly[scala.reflect.macros.Context#TypeTag[Int]]
+            //   implicitly[scala.reflect.macros.blackbox.Context#TypeTag[Int]]
             // then we need to fail, because we don't know the prefix to use during type reification
             // upd. we also need to fail silently, because this is a very common situation
             // e.g. quite often we're searching for BaseUniverse#TypeTag, e.g. for a type tag in any universe
@@ -1145,8 +1183,6 @@ trait Implicits {
       // this is ugly but temporary, since all this code will be removed once I fix implicit macros
       else SearchFailure
     }
-
-    private val ManifestSymbols = Set[Symbol](PartialManifestClass, FullManifestClass, OptManifestClass)
 
     /** Creates a tree that calls the relevant factory method in object
       * scala.reflect.Manifest for type 'tp'. An EmptyTree is returned if
@@ -1177,7 +1213,7 @@ trait Implicits {
       def findSubManifest(tp: Type) = findManifest(tp, if (full) FullManifestClass else OptManifestClass)
       def mot(tp0: Type, from: List[Symbol], to: List[Type]): SearchResult = {
         implicit def wrapResult(tree: Tree): SearchResult =
-          if (tree == EmptyTree) SearchFailure else new SearchResult(tree, if (from.isEmpty) EmptyTreeTypeSubstituter else new TreeTypeSubstituter(from, to))
+          if (tree == EmptyTree) SearchFailure else new SearchResult(tree, if (from.isEmpty) EmptyTreeTypeSubstituter else new TreeTypeSubstituter(from, to), Nil)
 
         val tp1 = tp0.dealias
         tp1 match {
@@ -1237,22 +1273,24 @@ trait Implicits {
         if (tagInScope.isEmpty) mot(tp, Nil, Nil)
         else {
           if (ReflectRuntimeUniverse == NoSymbol) {
-            // todo. write a test for this
-            context.error(pos,
+            // TODO: write a test for this (the next error message is already checked by neg/interop_typetags_without_classtags_arenot_manifests.scala)
+            // TODO: this was using context.error, and implicit search always runs in silent mode, thus it was actually throwing a TypeError
+            // with the new strategy-based reporting, a BufferingReporter buffers instead of throwing
+            // it would be good to rework this logic to fit into the regular context.error mechanism
+            throw new TypeError(pos,
               sm"""to create a manifest here, it is necessary to interoperate with the type tag `$tagInScope` in scope.
                   |however typetag -> manifest conversion requires Scala reflection, which is not present on the classpath.
                   |to proceed put scala-reflect.jar on your compilation classpath and recompile.""")
-            return SearchFailure
           }
           if (resolveClassTag(pos, tp, allowMaterialization = true) == EmptyTree) {
-            context.error(pos,
+            throw new TypeError(pos,
               sm"""to create a manifest here, it is necessary to interoperate with the type tag `$tagInScope` in scope.
                   |however typetag -> manifest conversion requires a class tag for the corresponding type to be present.
                   |to proceed add a class tag to the type `$tp` (e.g. by introducing a context bound) and recompile.""")
-            return SearchFailure
           }
           val cm = typed(Ident(ReflectRuntimeCurrentMirror))
-          val interop = gen.mkMethodCall(ReflectRuntimeUniverse, nme.typeTagToManifest, List(tp), List(cm, tagInScope))
+          val internal = gen.mkAttributedSelect(gen.mkAttributedRef(ReflectRuntimeUniverse), UniverseInternal)
+          val interop = gen.mkMethodCall(Select(internal, nme.typeTagToManifest), List(tp), List(cm, tagInScope))
           wrapResult(interop)
         }
       } else {
@@ -1264,7 +1302,7 @@ trait Implicits {
     }
 
     def wrapResult(tree: Tree): SearchResult =
-      if (tree == EmptyTree) SearchFailure else new SearchResult(tree, EmptyTreeTypeSubstituter)
+      if (tree == EmptyTree) SearchFailure else new SearchResult(atPos(pos.focus)(tree), EmptyTreeTypeSubstituter, Nil)
 
     /** Materializes implicits of predefined types (currently, manifests and tags).
      *  Will be replaced by implicit macros once we fix them.
@@ -1304,62 +1342,86 @@ trait Implicits {
      *  If all fails return SearchFailure
      */
     def bestImplicit: SearchResult = {
-      val failstart = if (Statistics.canEnable) Statistics.startTimer(inscopeFailNanos) else null
-      val succstart = if (Statistics.canEnable) Statistics.startTimer(inscopeSucceedNanos) else null
+      val stats = Statistics.canEnable
+      val failstart = if (stats) Statistics.startTimer(inscopeFailNanos) else null
+      val succstart = if (stats) Statistics.startTimer(inscopeSucceedNanos) else null
 
-      var result = searchImplicit(context.implicitss, isLocal = true)
+      var result = searchImplicit(context.implicitss, isLocalToCallsite = true)
 
-      if (result.isFailure) {
-        if (Statistics.canEnable) Statistics.stopTimer(inscopeFailNanos, failstart)
-      } else {
-        if (Statistics.canEnable) Statistics.stopTimer(inscopeSucceedNanos, succstart)
-        if (Statistics.canEnable) Statistics.incCounter(inscopeImplicitHits)
+      if (stats) {
+        if (result.isFailure) Statistics.stopTimer(inscopeFailNanos, failstart)
+        else {
+          Statistics.stopTimer(inscopeSucceedNanos, succstart)
+          Statistics.incCounter(inscopeImplicitHits)
+        }
       }
-      if (result.isFailure) {
-        val previousErrs = context.flushAndReturnBuffer()
-        val failstart = if (Statistics.canEnable) Statistics.startTimer(oftypeFailNanos) else null
-        val succstart = if (Statistics.canEnable) Statistics.startTimer(oftypeSucceedNanos) else null
 
-        val wasAmbigious = result.isAmbiguousFailure // SI-6667, never search companions after an ambiguous error in in-scope implicits
+      if (result.isFailure) {
+        val failstart = if (stats) Statistics.startTimer(oftypeFailNanos) else null
+        val succstart = if (stats) Statistics.startTimer(oftypeSucceedNanos) else null
+
+        // SI-6667, never search companions after an ambiguous error in in-scope implicits
+        val wasAmbigious = result.isAmbiguousFailure
+
+        // TODO: encapsulate
+        val previousErrs = context.reporter.errors
+        context.reporter.clearAllErrors()
+
         result = materializeImplicit(pt)
+
         // `materializeImplicit` does some preprocessing for `pt`
         // is it only meant for manifests/tags or we need to do the same for `implicitsOfExpectedType`?
         if (result.isFailure && !wasAmbigious)
-          result = searchImplicit(implicitsOfExpectedType, isLocal = false)
+          result = searchImplicit(implicitsOfExpectedType, isLocalToCallsite = false)
 
-        if (result.isFailure) {
-          context.updateBuffer(previousErrs)
-          if (Statistics.canEnable) Statistics.stopTimer(oftypeFailNanos, failstart)
-        } else {
-          if (Statistics.canEnable) Statistics.stopTimer(oftypeSucceedNanos, succstart)
-          if (Statistics.canEnable) Statistics.incCounter(oftypeImplicitHits)
+        if (result.isFailure)
+          context.reporter ++= previousErrs
+
+        if (stats) {
+          if (result.isFailure) Statistics.stopTimer(oftypeFailNanos, failstart)
+          else {
+            Statistics.stopTimer(oftypeSucceedNanos, succstart)
+            Statistics.incCounter(oftypeImplicitHits)
+          }
         }
       }
       if (result.isSuccess && isView) {
         def maybeInvalidConversionError(msg: String) {
           // We have to check context.ambiguousErrors even though we are calling "issueAmbiguousError"
           // which ostensibly does exactly that before issuing the error. Why? I have no idea. Test is pos/t7690.
+          // AM: I would guess it's because ambiguous errors will be buffered in silent mode if they are not reported
           if (context.ambiguousErrors)
             context.issueAmbiguousError(AmbiguousImplicitTypeError(tree, msg))
         }
-        if (isInvalidConversionTarget(pt)) {
-          maybeInvalidConversionError("the result type of an implicit conversion must be more specific than AnyRef")
-          result = SearchFailure
+        pt match {
+          case Function1(_, out) =>
+            // must inline to avoid capturing result
+            def prohibit(sym: Symbol) = (sym.tpe <:< out) && {
+              maybeInvalidConversionError(s"the result type of an implicit conversion must be more specific than ${sym.name}")
+              true
+            }
+            if (prohibit(AnyRefClass) || (settings.isScala211 && prohibit(AnyValClass)))
+              result = SearchFailure
+          case _                 => false
         }
-        else if (isInvalidConversionSource(pt)) {
+        if (settings.isScala211 && isInvalidConversionSource(pt)) {
           maybeInvalidConversionError("an expression of type Null is ineligible for implicit conversion")
           result = SearchFailure
         }
       }
-      if (result.isFailure)
-        debuglog("no implicits found for "+pt+" "+pt.typeSymbol.info.baseClasses+" "+implicitsOfExpectedType)
+
+      if (result.isFailure && settings.debug) // debuglog is not inlined for some reason
+        log("no implicits found for "+pt+" "+pt.typeSymbol.info.baseClasses+" "+implicitsOfExpectedType)
 
       result
     }
 
     def allImplicits: List[SearchResult] = {
-      def search(iss: Infoss, isLocal: Boolean) = applicableInfos(iss, isLocal).values
-      (search(context.implicitss, isLocal = true) ++ search(implicitsOfExpectedType, isLocal = false)).toList.filter(_.tree ne EmptyTree)
+      def search(iss: Infoss, isLocalToCallsite: Boolean) = applicableInfos(iss, isLocalToCallsite).values
+      (
+        search(context.implicitss, isLocalToCallsite = true) ++
+        search(implicitsOfExpectedType, isLocalToCallsite = false)
+      ).toList.filter(_.tree ne EmptyTree)
     }
 
     // find all implicits for some type that contains type variables
@@ -1367,23 +1429,23 @@ trait Implicits {
     def allImplicitsPoly(tvars: List[TypeVar]): List[(SearchResult, List[TypeConstraint])] = {
       def resetTVars() = tvars foreach { _.constr = new TypeConstraint }
 
-      def eligibleInfos(iss: Infoss, isLocal: Boolean) = {
-        val eligible = new ImplicitComputation(iss, isLocal).eligible
+      def eligibleInfos(iss: Infoss, isLocalToCallsite: Boolean) = {
+        val eligible = new ImplicitComputation(iss, isLocalToCallsite).eligible
         eligible.toList.flatMap {
           (ii: ImplicitInfo) =>
-        // each ImplicitInfo contributes a distinct set of constraints (generated indirectly by typedImplicit)
-        // thus, start each type var off with a fresh for every typedImplicit
-        resetTVars()
-        // any previous errors should not affect us now
-        context.flushBuffer()
-
-            val res = typedImplicit(ii, ptChecked = false, isLocal)
-        if (res.tree ne EmptyTree) List((res, tvars map (_.constr)))
-        else Nil
+          // each ImplicitInfo contributes a distinct set of constraints (generated indirectly by typedImplicit)
+          // thus, start each type var off with a fresh for every typedImplicit
+          resetTVars()
+          // any previous errors should not affect us now
+          context.reporter.clearAllErrors()
+          val res = typedImplicit(ii, ptChecked = false, isLocalToCallsite)
+          if (res.tree ne EmptyTree) List((res, tvars map (_.constr)))
+          else Nil
+        }
       }
+      eligibleInfos(context.implicitss, isLocalToCallsite = true) ++
+      eligibleInfos(implicitsOfExpectedType, isLocalToCallsite = false)
     }
-      eligibleInfos(context.implicitss, isLocal = true) ++ eligibleInfos(implicitsOfExpectedType, isLocal = false)
-  }
   }
 
   object ImplicitNotFoundMsg {
@@ -1405,32 +1467,35 @@ trait Implicits {
         case None => Some("Missing argument `msg` on implicitNotFound annotation.")
       })
 
+    // http://dcsobral.blogspot.com/2010/01/string-interpolation-in-scala-with.html
+    private val Intersobralator = """\$\{\s*([^}\s]+)\s*\}""".r
 
     class Message(sym: Symbol, msg: String) {
-      // http://dcsobral.blogspot.com/2010/01/string-interpolation-in-scala-with.html
-      private def interpolate(text: String, vars: Map[String, String]) = {
-        """\$\{([^}]+)\}""".r.replaceAllIn(text, (_: Regex.Match) match {
-          case Regex.Groups(v) => java.util.regex.Matcher.quoteReplacement(vars.getOrElse(v, "")) // #3915: need to quote replacement string since it may include $'s (such as the interpreter's $iw)
-        })}
+      private def interpolate(text: String, vars: Map[String, String]) =
+        Intersobralator.replaceAllIn(text, (_: Regex.Match) match {
+          case Regex.Groups(v) => Regex quoteReplacement vars.getOrElse(v, "")
+          // #3915: need to quote replacement string since it may include $'s (such as the interpreter's $iw)
+        })
 
       private lazy val typeParamNames: List[String] = sym.typeParams.map(_.decodedName)
+      private def typeArgsAtSym(paramTp: Type) = paramTp.baseType(sym).typeArgs
 
-      def format(paramName: Name, paramTp: Type): String = format(paramTp.typeArgs map (_.toString))
+      def format(paramName: Name, paramTp: Type): String = format(typeArgsAtSym(paramTp) map (_.toString))
+
       def format(typeArgs: List[String]): String =
         interpolate(msg, Map((typeParamNames zip typeArgs): _*)) // TODO: give access to the name and type of the implicit argument, etc?
 
       def validate: Option[String] = {
-        // is there a shorter way to avoid the intermediate toList?
-        val refs = """\$\{([^}]+)\}""".r.findAllIn(msg).matchData.map(_ group 1).toSet
+        val refs  = Intersobralator.findAllMatchIn(msg).map(_ group 1).toSet
         val decls = typeParamNames.toSet
 
         (refs &~ decls) match {
           case s if s.isEmpty => None
-          case unboundNames =>
+          case unboundNames   =>
             val singular = unboundNames.size == 1
-            Some("The type parameter"+( if(singular) " " else "s " )+ unboundNames.mkString(", ")  +
-                  " referenced in the message of the @implicitNotFound annotation "+( if(singular) "is" else "are" )+
-                  " not defined by "+ sym +".")
+            val ess      = if (singular) "" else "s"
+            val bee      = if (singular) "is" else "are"
+            Some(s"The type parameter$ess ${unboundNames mkString ", "} referenced in the message of the @implicitNotFound annotation $bee not defined by $sym.")
         }
       }
     }

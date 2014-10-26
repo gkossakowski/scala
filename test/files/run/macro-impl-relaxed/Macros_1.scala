@@ -1,5 +1,5 @@
 import language.experimental.macros
-import scala.reflect.macros.Context
+import scala.reflect.macros.blackbox.Context
 
 object Macros {
   def implUU(c: Context)(x: c.Tree): c.Tree = x

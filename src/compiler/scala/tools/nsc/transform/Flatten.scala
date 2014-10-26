@@ -20,12 +20,16 @@ abstract class Flatten extends InfoTransform {
   /** Updates the owning scope with the given symbol, unlinking any others.
    */
   private def replaceSymbolInCurrentScope(sym: Symbol): Unit = exitingFlatten {
+    removeSymbolInCurrentScope(sym)
+    sym.owner.info.decls enter sym
+  }
+
+  private def removeSymbolInCurrentScope(sym: Symbol): Unit = exitingFlatten {
     val scope = sym.owner.info.decls
     val old   = (scope lookupUnshadowedEntries sym.name).toList
     old foreach (scope unlink _)
-    scope enter sym
     def old_s = old map (_.sym) mkString ", "
-    debuglog(s"In scope of ${sym.owner}, unlinked $old_s and entered $sym")
+    if (old.nonEmpty) debuglog(s"In scope of ${sym.owner}, unlinked $old_s")
   }
 
   private def liftClass(sym: Symbol) {
@@ -72,8 +76,20 @@ abstract class Flatten extends InfoTransform {
             for (sym <- decls) {
               if (sym.isTerm && !sym.isStaticModule) {
                 decls1 enter sym
-                if (sym.isModule)
+                if (sym.isModule) {
+                  // In theory, we could assert(sym.isMethod), because nested, non-static moduls are
+                  // transformed to methods (lateMETHOD flag added in RefChecks). But this requires
+                  // forcing sym.info (see comment on isModuleNotMethod), which forces stub symbols
+                  // too eagerly (SI-8907).
+
+                  // Note that module classes are not entered into the 'decls' of the ClassInfoType
+                  // of the outer class, only the module symbols are. So the current loop does
+                  // not visit module classes. Therefore we set the LIFTED flag here for module
+                  // classes.
+                  // TODO: should we also set the LIFTED flag for static, nested module classes?
+                  // currently they don't get the flag, even though they are lifted to the package
                   sym.moduleClass setFlag LIFTED
+                }
               } else if (sym.isClass)
                 liftSymbol(sym)
             }
@@ -100,23 +116,38 @@ abstract class Flatten extends InfoTransform {
     /** Buffers for lifted out classes */
     private val liftedDefs = perRunCaches.newMap[Symbol, ListBuffer[Tree]]()
 
-    override def transform(tree: Tree): Tree = {
+    override def transform(tree: Tree): Tree = postTransform {
       tree match {
         case PackageDef(_, _) =>
           liftedDefs(tree.symbol.moduleClass) = new ListBuffer
+          super.transform(tree)
         case Template(_, _, _) if tree.symbol.isDefinedInPackage =>
           liftedDefs(tree.symbol.owner) = new ListBuffer
+          super.transform(tree)
+        case ClassDef(_, _, _, _) if tree.symbol.isNestedClass =>
+          // SI-5508 Ordering important. In `object O { trait A { trait B } }`, we want `B` to appear after `A` in
+          //         the sequence of lifted trees in the enclosing package. Why does this matter? Currently, mixin
+          //         needs to transform `A` first to a chance to create accessors for private[this] trait fields
+          //         *before* it transforms inner classes that refer to them. This also fixes SI-6231.
+          //
+          //         Alternative solutions
+          //            - create the private[this] accessors eagerly in Namer (but would this cover private[this] fields
+          //              added later phases in compilation?)
+          //            - move the accessor creation to the Mixin info transformer
+          val liftedBuffer = liftedDefs(tree.symbol.enclosingTopLevelClass.owner)
+          val index = liftedBuffer.length
+          liftedBuffer.insert(index, super.transform(tree))
+          if (tree.symbol.sourceModule.isStaticModule)
+            removeSymbolInCurrentScope(tree.symbol.sourceModule)
+          EmptyTree
         case _ =>
+          super.transform(tree)
       }
-      postTransform(super.transform(tree))
     }
 
     private def postTransform(tree: Tree): Tree = {
       val sym = tree.symbol
       val tree1 = tree match {
-        case ClassDef(_, _, _, _) if sym.isNestedClass =>
-          liftedDefs(sym.enclosingTopLevelClass.owner) += tree
-          EmptyTree
         case Select(qual, name) if sym.isStaticModule && !sym.isTopLevel =>
           exitingFlatten {
             atPos(tree.pos) {
@@ -134,7 +165,10 @@ abstract class Flatten extends InfoTransform {
     /** Transform statements and add lifted definitions to them. */
     override def transformStats(stats: List[Tree], exprOwner: Symbol): List[Tree] = {
       val stats1 = super.transformStats(stats, exprOwner)
-      if (currentOwner.isPackageClass) stats1 ::: liftedDefs(currentOwner).toList
+      if (currentOwner.isPackageClass) {
+        val lifted = liftedDefs(currentOwner).toList
+        stats1 ::: lifted
+      }
       else stats1
     }
   }

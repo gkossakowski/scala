@@ -57,7 +57,10 @@ class LinkedHashSet[A] extends AbstractSet[A]
 
   def contains(elem: A): Boolean = findEntry(elem) ne null
 
+  @deprecatedOverriding("+= should not be overridden so it stays consistent with add.", "2.11.0")
   def += (elem: A): this.type = { add(elem); this }
+
+  @deprecatedOverriding("-= should not be overridden so it stays consistent with remove.", "2.11.0")
   def -= (elem: A): this.type = { remove(elem); this }
 
   override def add(elem: A): Boolean = findOrAddEntry(elem, null) eq null
@@ -81,7 +84,7 @@ class LinkedHashSet[A] extends AbstractSet[A]
       if (hasNext) { val res = cur.key; cur = cur.later; res }
       else Iterator.empty.next()
   }
-  
+
   override def foreach[U](f: A => U) {
     var cur = firstEntry
     while (cur ne null) {

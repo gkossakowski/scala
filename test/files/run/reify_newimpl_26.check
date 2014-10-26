@@ -1,8 +1,6 @@
 Type in expressions to have them evaluated.
 Type :help for more information.
 
-scala> 
-
 scala> def foo[T]{
   import scala.reflect.runtime.universe._
   val tt = implicitly[WeakTypeTag[List[T]]]
@@ -16,6 +14,4 @@ foo: [T]=> Unit
 scala> foo[Int]
 WeakTypeTag[scala.List[T]]
 
-scala> 
-
-scala> 
+scala> :quit

@@ -192,21 +192,24 @@ abstract class LazyVals extends Transform with TypingTransformers with ast.TreeD
 
     def mkSlowPathDef(clazz: Symbol, lzyVal: Symbol, cond: Tree, syncBody: List[Tree],
                       stats: List[Tree], retVal: Tree): Tree = {
+      // Q: is there a reason to first set owner to `clazz` (by using clazz.newMethod), and then
+      // changing it to lzyVal.owner very soon after? Could we just do lzyVal.owner.newMethod?
       val defSym = clazz.newMethod(nme.newLazyValSlowComputeName(lzyVal.name.toTermName), lzyVal.pos, STABLE | PRIVATE)
       defSym setInfo MethodType(List(), lzyVal.tpe.resultType)
       defSym.owner = lzyVal.owner
       debuglog(s"crete slow compute path $defSym with owner ${defSym.owner} for lazy val $lzyVal")
       if (bitmaps.contains(lzyVal))
         bitmaps(lzyVal).map(_.owner = defSym)
-      val rhs: Tree = (gen.mkSynchronizedCheck(clazz, cond, syncBody, stats)).changeOwner(currentOwner -> defSym)
-      DEF(defSym).mkTree(addBitmapDefs(lzyVal, BLOCK(rhs, retVal))) setSymbol defSym
+      val rhs: Tree = gen.mkSynchronizedCheck(clazz, cond, syncBody, stats).changeOwner(currentOwner -> defSym)
+
+      DefDef(defSym, addBitmapDefs(lzyVal, BLOCK(rhs, retVal)))
     }
 
 
     def mkFastPathBody(clazz: Symbol, lzyVal: Symbol, cond: Tree, syncBody: List[Tree],
                        stats: List[Tree], retVal: Tree): (Tree, Tree) = {
       val slowPathDef: Tree = mkSlowPathDef(clazz, lzyVal, cond, syncBody, stats, retVal)
-      (If(cond, Apply(ID(slowPathDef.symbol), List()), retVal), slowPathDef)
+      (If(cond, Apply(Ident(slowPathDef.symbol), Nil), retVal), slowPathDef)
     }
 
     /** return a 'lazified' version of rhs. Rhs should conform to the

@@ -1,7 +1,7 @@
 import language.experimental.macros
-import scala.reflect.macros.Macro
+import scala.reflect.macros.blackbox.Context
 
-trait Impls extends Macro {
+class Impls(val c: Context) {
   import c.universe._
   def impl1 = q"println(1)"
   def impl2 = q"{ println(2); println(3) }"
@@ -9,7 +9,7 @@ trait Impls extends Macro {
 }
 
 object Macros {
-  def m1 = macro Impls.impl1
-  def m2 = macro Impls.impl2
-  def m3 = macro Impls.impl3
+  def m1: Unit = macro Impls.impl1
+  def m2: Unit = macro Impls.impl2
+  def m3: Int = macro Impls.impl3
 }

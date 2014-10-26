@@ -8,9 +8,12 @@
 
 package scala.concurrent
 
+import java.util.concurrent.TimeUnit
+
 /** A class to provide safe concurrent access to a mutable cell.
  *  All methods are synchronized.
  *
+ *  @tparam A type of the contained value
  *  @author  Martin Odersky
  *  @version 1.0, 10/03/2003
  */
@@ -18,19 +21,27 @@ class SyncVar[A] {
   private var isDefined: Boolean = false
   private var value: Option[A] = None
 
+  /**
+   * Waits for this SyncVar to become defined and returns
+   * the result, without modifying the stored value.
+   *
+   * @return value that is held in this container
+   */
   def get: A = synchronized {
     while (!isDefined) wait()
     value.get
   }
 
-  /** Waits `timeout` millis. If `timeout <= 0` just returns 0. If the system clock
-   *  went backward, it will return 0, so it never returns negative results.
-   */
+  /** Waits `timeout` millis. If `timeout <= 0` just returns 0.
+    * It never returns negative results.
+    */
   private def waitMeasuringElapsed(timeout: Long): Long = if (timeout <= 0) 0 else {
-    val start = System.currentTimeMillis
+    val start = System.nanoTime()
     wait(timeout)
-    val elapsed = System.currentTimeMillis - start
-    if (elapsed < 0) 0 else elapsed
+    val elapsed = System.nanoTime() - start
+    // nanoTime should be monotonic, but it's not possible to rely on that.
+    // See http://bugs.sun.com/bugdatabase/view_bug.do?bug_id=6458294.
+    if (elapsed < 0) 0 else TimeUnit.NANOSECONDS.toMillis(elapsed)
   }
 
   /** Waits for this SyncVar to become defined at least for
@@ -53,8 +64,12 @@ class SyncVar[A] {
     value
   }
 
-  /** Waits for this SyncVar to become defined and returns
-   *  the result */
+  /**
+   * Waits for this SyncVar to become defined and returns
+   * the result, unsetting the stored value before returning.
+   *
+   * @return value that was held in this container
+   */
   def take(): A = synchronized {
     try get
     finally unsetVal()
@@ -125,4 +140,3 @@ class SyncVar[A] {
   }
 
 }
-

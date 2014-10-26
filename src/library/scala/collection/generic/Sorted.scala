@@ -62,7 +62,8 @@ trait Sorted[K, +This <: Sorted[K, This]] {
   /** Creates a ranged projection of this collection with both a lower-bound
    *  and an upper-bound.
    *
-   *  @param from  The upper-bound (exclusive) of the ranged projection.
+   *  @param from The lower-bound (inclusive) of the ranged projection.
+   *  @param until The upper-bound (exclusive) of the ranged projection.
    */
   def range(from: K, until: K): This = rangeImpl(Some(from), Some(until))
 
@@ -79,14 +80,14 @@ trait Sorted[K, +This <: Sorted[K, This]] {
     else
       until(next)
   }
-  
+
   /**
    * Creates an iterator over all the keys(or elements)  contained in this
    * collection greater than or equal to `start`
-   * according to the ordering of this collection. x.keysIteratorFrom(y) 
-   * is equivalent to but often more efficient than 
+   * according to the ordering of this collection. x.keysIteratorFrom(y)
+   * is equivalent to but often more efficient than
    * x.from(y).keysIterator.
-   * 
+   *
    * @param start The lower bound (inclusive)
    * on the keys to be returned
    */

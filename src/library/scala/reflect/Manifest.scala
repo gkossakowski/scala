@@ -46,7 +46,7 @@ trait Manifest[T] extends ClassManifest[T] with Equals {
   override def typeArguments: List[Manifest[_]] = Nil
 
   override def arrayManifest: Manifest[Array[T]] =
-    Manifest.classType[Array[T]](arrayClass[T](erasure), this)
+    Manifest.classType[Array[T]](arrayClass[T](runtimeClass), this)
 
   override def canEqual(that: Any): Boolean = that match {
     case _: Manifest[_]   => true
@@ -56,14 +56,15 @@ trait Manifest[T] extends ClassManifest[T] with Equals {
    *  faster than <:< and rules out most comparisons.
    */
   override def equals(that: Any): Boolean = that match {
-    case m: Manifest[_] => (m canEqual this) && (this.erasure == m.erasure) && (this <:< m) && (m <:< this)
+    case m: Manifest[_] => (m canEqual this) && (this.runtimeClass == m.runtimeClass) && (this <:< m) && (m <:< this)
     case _              => false
   }
-  override def hashCode = this.erasure.##
+  override def hashCode = this.runtimeClass.##
 }
 
 // TODO undeprecated until Scala reflection becomes non-experimental
 // @deprecated("Use type tags and manually check the corresponding class or type instead", "2.10.0")
+@SerialVersionUID(1L)
 abstract class AnyValManifest[T <: AnyVal](override val toString: String) extends Manifest[T] with Equals {
   override def <:<(that: ClassManifest[_]): Boolean =
     (that eq this) || (that eq Manifest.Any) || (that eq Manifest.AnyVal)
@@ -72,6 +73,7 @@ abstract class AnyValManifest[T <: AnyVal](override val toString: String) extend
     case _                    => false
   }
   override def equals(that: Any): Boolean = this eq that.asInstanceOf[AnyRef]
+  @transient
   override val hashCode = System.identityHashCode(this)
 }
 
@@ -228,6 +230,7 @@ object ManifestFactory {
   private abstract class PhantomManifest[T](_runtimeClass: Predef.Class[_],
                                             override val toString: String) extends ClassTypeManifest[T](None, _runtimeClass, Nil) {
     override def equals(that: Any): Boolean = this eq that.asInstanceOf[AnyRef]
+    @transient
     override val hashCode = System.identityHashCode(this)
   }
 
@@ -238,7 +241,7 @@ object ManifestFactory {
                                      override val typeArguments: List[Manifest[_]]) extends Manifest[T] {
     override def toString =
       (if (prefix.isEmpty) "" else prefix.get.toString+"#") +
-      (if (erasure.isArray) "Array" else erasure.getName) +
+      (if (runtimeClass.isArray) "Array" else runtimeClass.getName) +
       argString
    }
 
@@ -259,7 +262,7 @@ object ManifestFactory {
     */
   def wildcardType[T](lowerBound: Manifest[_], upperBound: Manifest[_]): Manifest[T] =
     new Manifest[T] {
-      def runtimeClass = upperBound.erasure
+      def runtimeClass = upperBound.runtimeClass
       override def toString =
         "_" +
         (if (lowerBound eq Nothing) "" else " >: "+lowerBound) +
@@ -269,7 +272,7 @@ object ManifestFactory {
   /** Manifest for the intersection type `parents_0 with ... with parents_n'. */
   def intersectionType[T](parents: Manifest[_]*): Manifest[T] =
     new Manifest[T] {
-      def runtimeClass = parents.head.erasure
+      def runtimeClass = parents.head.runtimeClass
       override def toString = parents.mkString(" with ")
     }
 }

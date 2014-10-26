@@ -1,4 +1,4 @@
-import reflect.macros.Context
+import scala.reflect.macros.blackbox.Context
 
 object Impls {
   def foreach(c: Context)(f: c.Expr[Int => Unit]): c.Expr[Unit] = {
@@ -9,7 +9,7 @@ object Impls {
     import c.universe._
     import Flag._
 
-    val initName = nme.CONSTRUCTOR
+    val initName = termNames.CONSTRUCTOR
     // Either:
     //   scala"{ var i = $low; val h = $hi; while (i < h) { $f(i); i = i + 1 } }
     // or:

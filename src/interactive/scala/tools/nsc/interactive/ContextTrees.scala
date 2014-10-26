@@ -6,6 +6,7 @@ package scala.tools.nsc
 package interactive
 
 import scala.collection.mutable.ArrayBuffer
+import scala.annotation.tailrec
 
 trait ContextTrees { self: Global =>
 
@@ -28,44 +29,71 @@ trait ContextTrees { self: Global =>
     override def toString = "ContextTree("+pos+", "+children+")"
   }
 
-  /** Optionally returns the smallest context that contains given `pos`, or None if none exists.
+  /** Returns the most precise context possible for the given `pos`.
+   *
+   *  It looks for the finest ContextTree containing `pos`, and then look inside
+   *  this ContextTree for a child ContextTree located immediately before `pos`.
+   *  If such a child exists, returns its context, otherwise returns the context of
+   *  the parent ContextTree.
+   *
+   *  This is required to always return a context which contains the all the imports
+   *  declared up to `pos` (see SI-7280 for a test case).
+   *
+   *  Can return None if `pos` is before any valid Scala code.
    */
   def locateContext(contexts: Contexts, pos: Position): Option[Context] = synchronized {
-    def locateNearestContextTree(contexts: Contexts, pos: Position, recent: Array[ContextTree]): Option[ContextTree] = {
-      locateContextTree(contexts, pos) match {
-        case Some(x) =>
-          recent(0) = x
-          locateNearestContextTree(x.children, pos, recent)
-        case None => recent(0) match {
-            case null => None
-            case x => Some(x)
-          }
+    @tailrec
+    def locateFinestContextTree(context: ContextTree): ContextTree = {
+      if (context.pos includes pos) {
+        locateContextTree(context.children, pos) match {
+          case Some(x) =>
+            locateFinestContextTree(x)
+          case None =>
+            context
+        }
+      } else {
+        context
       }
     }
-    locateNearestContextTree(contexts, pos, new Array[ContextTree](1)) map (_.context)
+    locateContextTree(contexts, pos) map locateFinestContextTree map (_.context)
   }
 
+  /** Returns the ContextTree containing `pos`, or the ContextTree positioned just before `pos`,
+   *  or None if `pos` is located before all ContextTrees.
+   */ 
   def locateContextTree(contexts: Contexts, pos: Position): Option[ContextTree] = {
     if (contexts.isEmpty) None
     else {
-      val hi = contexts.length - 1
-      if ((contexts(hi).pos properlyPrecedes pos) || (pos properlyPrecedes contexts(0).pos)) None
-      else {
-        def loop(lo: Int, hi: Int): Option[ContextTree] = {
+      // binary search on contexts, loop invar: lo <= hi, recursion metric: `hi - lo`
+      @tailrec
+      def loop(lo: Int, hi: Int, previousSibling: Option[ContextTree]): Option[ContextTree] = {
+        // [SI-8239] enforce loop invariant & ensure recursion metric decreases monotonically on every recursion
+        if (lo > hi) previousSibling
+        else if (pos properlyPrecedes contexts(lo).pos)
+          previousSibling
+        else if (contexts(hi).pos properlyPrecedes pos)
+          Some(contexts(hi))
+        else {
           val mid = (lo + hi) / 2
           val midpos = contexts(mid).pos
-          if ((pos precedes midpos) && (mid < hi))
-            loop(lo, mid)
-          else if ((midpos precedes pos) && (lo < mid))
-            loop(mid, hi)
-          else if (midpos includes pos)
+          if (midpos includes pos)
             Some(contexts(mid))
-          else if (contexts(mid+1).pos includes pos)
-            Some(contexts(mid+1))
-          else None
+          else if (midpos properlyPrecedes pos)
+            // recursion metric: (hi - ((lo + hi)/2 + 1)) < (hi - lo)
+            // since (hi - ((lo + hi)/2 + 1)) - (hi - lo) = lo - ((lo + hi)/2 + 1) < 0
+            // since 2*lo - lo - hi - 2 = lo - hi - 2 < 0
+            // since lo < hi + 2
+            // can violate lo <= hi, hence the lo > hi check at the top [SI-8239]
+            loop(mid + 1, hi, Some(contexts(mid)))
+          else if (lo != hi) // avoid looping forever (lo == hi violates the recursion metric) [SI-8239]
+            // recursion metric: ((lo + hi)/2) - lo < (hi - lo)
+            // since ((lo + hi)/2) - lo - (hi - lo) = ((lo + hi)/2) - hi < 0
+            // since 2 * (((lo + hi)/2) - hi) = lo - hi < 0 since lo < hi
+            loop(lo, mid, previousSibling)
+          else previousSibling
         }
-        loop(0, hi)
       }
+      loop(0, contexts.length - 1, None)
     }
   }
 

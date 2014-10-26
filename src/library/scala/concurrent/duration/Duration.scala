@@ -221,7 +221,7 @@ object Duration {
     final def toMinutes: Long = fail("toMinutes")
     final def toHours: Long   = fail("toHours")
     final def toDays: Long    = fail("toDays")
-	
+
     final def toCoarsest: Duration = this
   }
 
@@ -532,7 +532,7 @@ sealed abstract class Duration extends Serializable with Ordered[Duration] {
    * Duration(48, HOURS).toCoarsest // Duration(2, DAYS)
    * Duration(5, SECONDS).toCoarsest // Duration(5, SECONDS)
    * }}}
-   */  
+   */
   def toCoarsest: Duration
 }
 
@@ -621,7 +621,7 @@ final class FiniteDuration(val length: Long, val unit: TimeUnit) extends Duratio
   }
   def -(other: Duration) = other match {
     case x: FiniteDuration => add(-x.length, x.unit)
-    case _                 => other
+    case _                 => -other
   }
 
   def *(factor: Double) =
