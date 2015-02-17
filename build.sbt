@@ -176,23 +176,28 @@ lazy val generateVersionPropertiesFileImpl: Def.Initialize[Task[File]] = Def.tas
         else ((ver, suffixStr), (ver, suffixStr), (ver, suffixStr))
     }
 
-  def executeTool(tool: String) = {
-      val cmd =
-        if (System.getProperty("os.name").toLowerCase.contains("windows"))
-          s"cmd.exe /c tools\$tool.bat -p"
-        else s"tools/$tool"
-      Process(cmd).lines.head
-  }
-
-  val commitDate = executeTool("get-scala-commit-date")
-  val commitSha = executeTool("get-scala-commit-sha")
-
-  props.put("version.number", s"${ver._1}${ver._2}-$commitDate-$commitSha")
+  props.put("version.number", s"${ver._1}${ver._2}-${gitCommitDate.value}-${gitCommitSha.value}")
   props.put("maven.version.number", s"${mavenVer._1}${mavenVer._2}")
-  props.put("osgi.version.number", s"${osgiVer._1}.v$commitDate${osgiVer._2}-$commitSha")
+  props.put("osgi.version.number", s"${osgiVer._1}.v${gitCommitDate.value}${osgiVer._2}-${gitCommitSha.value}")
   props.put("copyright.string", copyrightString.value)
 
   IO.write(props, null, propFile)
 
   propFile
 }
+
+def executeTool(tool: String) = {
+    val cmd =
+      if (System.getProperty("os.name").toLowerCase.contains("windows"))
+        s"cmd.exe /c tools\$tool.bat -p"
+      else s"tools/$tool"
+    Process(cmd).lines.head
+}
+
+lazy val gitCommitDate = taskKey[String]("Determines the current git commit date")
+
+gitCommitDate in ThisBuild := executeTool("get-scala-commit-date")
+
+lazy val gitCommitSha = taskKey[String]("Determines the current git commit SHA")
+
+gitCommitSha in ThisBuild := executeTool("get-scala-commit-sha")
