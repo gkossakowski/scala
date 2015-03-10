@@ -202,6 +202,34 @@ lazy val forkjoin = configureAsForkOfJavaProject(project)
 
 lazy val asm = configureAsForkOfJavaProject(project)
 
+lazy val test = project.
+  settings(disableDocsAndPublishingTasks: _*).
+  settings(commonSettings: _*).
+  settings(
+    libraryDependencies += "org.scala-lang.modules" %% "scala-partest-interface" % "0.5.0-SNAPSHOT" % "test",
+    libraryDependencies += "org.scala-lang.modules" %% "scala-partest" % "1.0.5" % "test",
+    libraryDependencies += "org.scalacheck" %% "scalacheck" % "1.11.4" % "test",
+    libraryDependencies += "org.scala-lang.modules" %% "scala-xml" % "1.0.3" % "test",
+    unmanagedBase in Test := baseDirectory.value / "files" / "lib",
+    unmanagedJars in Test <+= (unmanagedBase) (j => Attributed.blank(j)) map(identity),
+    sourceDirectory in Compile := file("!!! none !!!"),
+    sourceDirectories in Compile := Seq.empty,
+    sourceDirectories in Test := Seq.empty,
+    fork in Test := true,
+    javaOptions in Test += "-Xmx1G",
+    testFrameworks += new TestFramework("scala.tools.partest.Framework"),
+    definedTests in Test += (
+      new sbt.TestDefinition(
+        "partest",
+        // marker fingerprint since there are no test classes
+        // to be discovered by sbt:
+        new sbt.testing.AnnotatedFingerprint {
+          def isModule = true
+          def annotationName = "partest"
+        }, true, Array())
+     )
+  ).dependsOn(compiler, actors, repl)
+
 lazy val root = (project in file(".")).
   aggregate(library, forkjoin, reflect, compiler, asm, interactive, repl,
     scaladoc, scalap, actors).settings(
