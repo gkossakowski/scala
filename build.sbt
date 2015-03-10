@@ -206,10 +206,11 @@ lazy val test = project.
   settings(disableDocsAndPublishingTasks: _*).
   settings(commonSettings: _*).
   settings(
-    libraryDependencies += "org.scala-lang.modules" %% "scala-partest-interface" % "0.5.0-SNAPSHOT" % "test",
-    libraryDependencies += "org.scala-lang.modules" %% "scala-partest" % "1.0.5" % "test",
-    libraryDependencies += "org.scalacheck" %% "scalacheck" % "1.11.4" % "test",
-    libraryDependencies += "org.scala-lang.modules" %% "scala-xml" % "1.0.3" % "test",
+    libraryDependencies ++= Seq(
+      "org.scala-lang.modules" %% "scala-partest-interface" % "0.4.0" % "test",
+      "org.scala-lang.modules" %% "scala-partest" % "1.0.5" % "test",
+      "org.scalacheck" %% "scalacheck" % "1.11.4" % "test",
+      "org.scala-lang.modules" %% "scala-xml" % "1.0.3" % "test"),
     unmanagedBase in Test := baseDirectory.value / "files" / "lib",
     unmanagedJars in Test <+= (unmanagedBase) (j => Attributed.blank(j)) map(identity),
     sourceDirectory in Compile := file("!!! none !!!"),
