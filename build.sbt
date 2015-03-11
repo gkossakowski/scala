@@ -208,9 +208,12 @@ lazy val root = (project in file(".")).
     scaladoc, scalap, actors).settings(
     scalaVersion := boostrapScalaVersion,
     ivyScala := ivyScala.value map { _.copy(overrideScalaVersion = true) },
-    sources in Compile := Seq.empty,
-    mkBin := mkBinImpl.value
+    sources in Compile := Seq.empty
   )
+
+lazy val dist = (project in file("dist")).settings(
+  mkBin := mkBinImpl.value
+)
 
 /**
  * Configures passed project as a subproject (e.g. compiler or repl)
@@ -303,7 +306,22 @@ lazy val generateVersionPropertiesFileImpl: Def.Initialize[Task[File]] = Def.tas
 }
 
 lazy val mkBinImpl: Def.Initialize[Task[Seq[File]]] = Def.task {
-  sys.error("TODO: Call code that lives in scala.tools.ant.ScalaTool")
+  def mkTool(file: String, mainCls: String, classpath: Seq[Attributed[File]]) =
+    ScalaTool(mainClass  = mainCls,
+              classpath  = classpath.toList.map(_.data.getAbsolutePath),
+              properties = Map.empty,
+              javaOpts   = "-Xmx256M -Xms32M",
+              toolFlags  = ""
+    ).writeScript(file, "unix",
+        rootDir = (classDirectory in Compile in LocalProject("compiler")).value,
+        outDir  = buildDirectory.value / "quick/bin")
+
+  Seq(
+    mkTool("bin/scala"    , "scala.tools.nsc.MainGenericRunner", (fullClasspath in Compile in repl).value),
+    mkTool("bin/scalac"   , "scala.tools.nsc.Main",              (fullClasspath in Compile in compiler).value),
+    mkTool("bin/fsc"      , "scala.tools.nsc.CompileClient",     (fullClasspath in Compile in compiler).value),
+    mkTool("bin/scaladoc" , "scala.tools.nsc.ScalaDoc",          (fullClasspath in Compile in scaladoc).value),
+    mkTool("bin/scalap"   , "scala.tools.scalap.Main",           (fullClasspath in Compile in scalap).value))
 }
 
 buildDirectory in ThisBuild := (baseDirectory in ThisBuild).value / "build-sbt"
