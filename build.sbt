@@ -50,12 +50,14 @@
  *     https://groups.google.com/d/topic/scala-internals/gp5JsM1E0Fo/discussion
  */
 
-val boostrapScalaVersion = "2.11.5"
+val bootstrapScalaVersion = "2.11.5"
+
+val partestDep = "org.scala-lang.modules" %% "scala-partest" % versionNumber("partest") exclude("org.scala-lang", "scala-library")
 
 lazy val commonSettings = Seq[Setting[_]](
   organization := "org.scala-lang",
   version := "2.11.6-SNAPSHOT",
-  scalaVersion := boostrapScalaVersion,
+  scalaVersion := bootstrapScalaVersion,
   // we don't cross build Scala itself
   crossPaths := false,
   // do not add Scala library jar as a dependency automatically
@@ -202,13 +204,32 @@ lazy val forkjoin = configureAsForkOfJavaProject(project)
 
 lazy val asm = configureAsForkOfJavaProject(project)
 
+lazy val partestExtras = configureAsSubproject(Project("partest-extras", file(".") / "src" / "partest-extras"))
+  .dependsOn(repl)
+  .settings(
+    scalaVersion := bootstrapScalaVersion,
+    ivyScala := ivyScala.value map { _.copy(overrideScalaVersion = true) },
+    libraryDependencies += partestDep,
+    unmanagedSourceDirectories in Compile := List(baseDirectory.value)
+  )
+
+lazy val partestJavaAgent = (project in file(".") / "src" / "partest-javaagent").
+  settings(scalaSubprojectSettings: _*).
+  settings(disableDocsAndPublishingTasks: _*).
+  dependsOn(scalaAsm)
+
+lazy val scalaAsm = (project in file(".") / "src" / "asm").
+  settings(scalaSubprojectSettings: _*).
+  settings(disableDocsAndPublishingTasks: _*).
+  dependsOn(compiler)
+
 lazy val test = project.
   settings(disableDocsAndPublishingTasks: _*).
   settings(commonSettings: _*).
   settings(
     libraryDependencies ++= Seq(
-      "org.scala-lang.modules" %% "scala-partest-interface" % "0.4.0" % "test",
-      "org.scala-lang.modules" %% "scala-partest" % "1.0.5" % "test",
+      "org.scala-lang.modules" %% "scala-partest-interface" % "0.5.0" % "test",
+      "org.scala-lang.modules" %% "scala-partest" % "1.0.5",
       "org.scalacheck" %% "scalacheck" % "1.11.4" % "test",
       "org.scala-lang.modules" %% "scala-xml" % "1.0.3" % "test"),
     unmanagedBase in Test := baseDirectory.value / "files" / "lib",
@@ -229,12 +250,12 @@ lazy val test = project.
           def annotationName = "partest"
         }, true, Array())
      )
-  ).dependsOn(compiler, actors, repl)
+  ).dependsOn(compiler, actors, repl, scalap, partestExtras, partestJavaAgent, asm, scalaAsm)
 
 lazy val root = (project in file(".")).
   aggregate(library, forkjoin, reflect, compiler, asm, interactive, repl,
     scaladoc, scalap, actors).settings(
-    scalaVersion := boostrapScalaVersion,
+    scalaVersion := bootstrapScalaVersion,
     ivyScala := ivyScala.value map { _.copy(overrideScalaVersion = true) },
     sources in Compile := Seq.empty
   )
@@ -329,3 +350,17 @@ lazy val generateVersionPropertiesFileImpl: Def.Initialize[Task[File]] = Def.tas
 }
 
 buildDirectory in ThisBuild := (baseDirectory in ThisBuild).value / "build-sbt"
+
+lazy val versionProps: Map[String, String] = {
+  import java.io.FileInputStream
+  import java.util.Properties
+  val props = new Properties()
+  val in = new FileInputStream(file("versions.properties"))
+  try props.load(in)
+  finally in.close()
+  import scala.collection.JavaConverters._
+  props.asScala.toMap
+}
+
+def versionNumber(name: String): String =
+  versionProps(s"$name.version.number")
