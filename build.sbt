@@ -250,7 +250,7 @@ lazy val test = project.
           def annotationName = "partest"
         }, true, Array())
      )
-  ).dependsOn(compiler, actors, repl, scalap, partestExtras, partestJavaAgent, asm, scalaAsm)
+  ).dependsOn(compiler, interactive, actors, repl, scalap, partestExtras, partestJavaAgent, asm, scalaAsm, scaladoc)
 
 lazy val root = (project in file(".")).
   aggregate(library, forkjoin, reflect, compiler, asm, interactive, repl,
