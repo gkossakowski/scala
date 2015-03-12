@@ -213,10 +213,28 @@ lazy val partestExtras = configureAsSubproject(Project("partest-extras", file(".
     unmanagedSourceDirectories in Compile := List(baseDirectory.value)
   )
 
+// Defining partestBuildDirectory as temporary measure to get instrumented tests working
+lazy val partestBuildDirectory = settingKey[File]("The directory where all build products go. By default ./build")
+partestBuildDirectory in ThisBuild := (baseDirectory in ThisBuild).value / "build"
 lazy val partestJavaAgent = (project in file(".") / "src" / "partest-javaagent").
-  settings(scalaSubprojectSettings: _*).
-  settings(disableDocsAndPublishingTasks: _*).
-  dependsOn(scalaAsm)
+  settings(commonSettings: _*).
+  settings(
+    /*publishArtifact in packageSrc := false,
+    publishArtifact in makePom := false,
+    publishArtifact in packageDoc := false,*/
+    // Setting name to "scala-partest-javaagent" so that the jar file gets that name, which the Runner relies on
+    name := "scala-partest-javaagent",
+    // writing jar file to /build/pack/lib because that's where it's expected to be found
+    artifactPath in packageBin in Compile := {
+      val resolvedArtifact = artifact.value
+      partestBuildDirectory.value / "pack/lib" / s"${resolvedArtifact.name}.${resolvedArtifact.extension}"
+    },
+    // add required manifest entry - previously included from file
+    packageOptions in (Compile, packageBin) += 
+      Package.ManifestAttributes( "Premain-Class" -> "scala.tools.partest.javaagent.ProfilingAgent" ),
+    // we need to build this to a JAR
+    exportJars := true
+  ).dependsOn(scalaAsm)
 
 lazy val scalaAsm = (project in file(".") / "src" / "asm").
   settings(scalaSubprojectSettings: _*).
