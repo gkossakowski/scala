@@ -1,8 +1,10 @@
 import ParserUtil._
 import sbt._
-import sbt.complete.Parser._
-import sbt.complete.Parsers._
-import sbt.complete._
+import sbt.internal.util.complete
+import sbt.internal.util.complete.Parser._
+import sbt.internal.util.complete.Parsers._
+import sbt.internal.util.complete._
+import sbt.io._
 
 object ScalaOptionParser {
   /** A SBT parser for the Scala command line runners (scala, scalac, etc) */

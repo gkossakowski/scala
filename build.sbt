@@ -54,6 +54,7 @@
  */
 
 import VersionUtil._
+import scala.xml.{TopScope => $scope}
 
 val bootstrapScalaVersion = versionProps("starr.version")
 
@@ -605,7 +606,7 @@ lazy val scalaDist = Project("scala-dist", file(".") / "target" / "scala-dist-di
       // With the way the resource files are spread out over the project sources we can't just add
       // an unmanagedResourceDirectory, so we generate the mappings manually:
       val docBaseDir = (baseDirectory in ThisBuild).value
-      val docMappings = (docBaseDir / "doc").*** pair relativeTo(docBaseDir)
+      val docMappings = (docBaseDir / "doc").allPaths pair relativeTo(docBaseDir)
       val resBaseDir = (baseDirectory in ThisBuild).value / "src/manual/scala/tools/docutil/resources"
       val resMappings = resBaseDir ** ("*.html" | "*.css" | "*.gif" | "*.png") pair (p => relativeTo(resBaseDir)(p).map("doc/tools/" + _))
       docMappings ++ resMappings ++ binMappings
@@ -916,7 +917,7 @@ intellij := {
     s.log.info("Updating library classpaths in src/intellij/scala.ipr.")
     val content = XML.loadFile(ipr)
 
-    val newStarr = replaceLibrary(content, "starr", Some("Scala"), starrDep((scalaInstance in LocalProject("compiler")).value.jars))
+    val newStarr = replaceLibrary(content, "starr", Some("Scala"), starrDep((scalaInstance in LocalProject("compiler")).value.allJars))
     val newModules = modules.foldLeft(newStarr)({
       case (res, (modName, jars)) =>
         if (jars.isEmpty) res // modules without dependencies

@@ -3,6 +3,7 @@ import Keys._
 import java.util.Properties
 import java.io.FileInputStream
 import scala.collection.JavaConverters._
+import scala.sys.process.Process
 
 object VersionUtil {
   lazy val baseVersion = settingKey[String]("The base version number from which all others are derived")
@@ -105,7 +106,7 @@ object VersionUtil {
     // this makes it harder to test for stability of generated artifacts
     // consider using https://github.com/etiennestuder/java-ordered-properties
     // instead of java.util.Properties
-    IO.write(props, null, propFile)
+    sbt.io.IO.write(props, null, propFile)
     propFile
   }
 

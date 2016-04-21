@@ -1,5 +1,6 @@
 import sbt._
-import sbt.complete._, Parser._, Parsers._
+import sbt.io._
+import sbt.internal.util.complete._, Parser._, Parsers._
 
 object PartestUtil {
   private case class TestFiles(srcPath: String, globalBase: File, testBase: File) {

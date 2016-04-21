@@ -37,12 +37,12 @@ object JarJar {
   case class JarEntryInput(jarFile: JarFile, entry: JarEntry) extends Entry {
     def name = entry.getName.replace('\\', '/')
     def time = entry.getTime
-    def data = sbt.IO.readBytes(jarFile.getInputStream(entry))
+    def data = sbt.io.IO.readBytes(jarFile.getInputStream(entry))
   }
   case class FileInput(base: File, file: File) extends Entry {
     def name = file.relativeTo(base).get.getPath.replace('\\', '/')
     def time = file.lastModified
-    def data = sbt.IO.readBytes(file)
+    def data = sbt.io.IO.readBytes(file)
   }
 
   private def newMainProcessor(patterns: java.util.List[PatternElement], verbose: Boolean, skipManifest: Boolean): JarProcessor = {
@@ -67,7 +67,7 @@ object JarJar {
           val f = outdir / struct.name
           try {
             f.getParentFile.mkdirs()
-            sbt.IO.write(f, struct.data)
+            sbt.io.IO.write(f, struct.data)
           } catch {
             case ex: Exception =>
               throw new IOException(s"Failed to write ${e.name} / ${f.getParentFile} / ${f.getParentFile.exists}", ex)

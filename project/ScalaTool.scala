@@ -44,8 +44,8 @@ case class ScalaTool(mainClass: String,
     val templatePath = s"scala/tools/ant/templates/tool-$platform.tmpl"
     val suffix       = if(forWindows) ".bat" else ""
     val scriptFile   = outDir / s"$file$suffix"
-    val patched      = patchedToolScript(IO.read(rootDir / templatePath).replace("\r", ""), forWindows)
-    IO.write(scriptFile, if(forWindows) patched.replace("\n", "\r\n") else patched)
+    val patched      = patchedToolScript(sbt.io.IO.read(rootDir / templatePath).replace("\r", ""), forWindows)
+    sbt.io.IO.write(scriptFile, if(forWindows) patched.replace("\n", "\r\n") else patched)
     scriptFile
   }
 }

@@ -1,7 +1,9 @@
 import sbt._
-import sbt.complete.Parser._
-import sbt.complete.Parsers._
-import sbt.complete._
+import sbt.io._
+import sbt.internal.util.complete
+import sbt.internal.util.complete.Parser._
+import sbt.internal.util.complete.Parsers._
+import sbt.internal.util.complete._
 
 object ParserUtil {
   def notStartingWith(parser: Parser[String], c: Char): Parser[String] = parser & not(c ~> any.*, "value cannot start with " + c + ".")

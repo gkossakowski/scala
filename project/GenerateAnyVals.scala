@@ -484,7 +484,7 @@ object GenerateAnyVals {
 
     av.make() foreach { case (name, code ) =>
       val file = new java.io.File(outDir, name + ".scala")
-      sbt.IO.write(file, code, java.nio.charset.Charset.forName("UTF-8"), false)
+      sbt.io.IO.write(file, code, java.nio.charset.Charset.forName("UTF-8"), false)
     }
   }
 }
