@@ -4,7 +4,7 @@ import org.pantsbuild.jarjar.util._
 import scala.collection.JavaConverters._
 import java.util.jar._
 import java.io._
-import sbt._
+import sbt._, syntax._, Keys._
 
 object JarJar {
   sealed abstract class JarJarConfig {

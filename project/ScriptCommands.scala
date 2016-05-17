@@ -1,6 +1,7 @@
 import sbt._
 import Keys._
 import sbt.internal.util.complete.DefaultParsers._
+import sbt._, syntax._, Keys._
 
 
 /** Custom commands for use by the Jenkins scripts. This keeps the surface area and call syntax small. */

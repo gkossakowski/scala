@@ -1,6 +1,5 @@
-import sbt._
-import sbt.io._
 import sbt.internal.util.complete._, Parser._, Parsers._
+import sbt._, syntax._, Keys._
 
 object PartestUtil {
   private case class TestFiles(srcPath: String, globalBase: File, testBase: File) {
@@ -9,7 +8,7 @@ object PartestUtil {
     private def testCaseFinder = (testBase / srcPath).*(AllPassFilter).*(testCaseFilter)
     private val basePaths = allTestCases.map(_._2.split('/').take(3).mkString("/") + "/").distinct
 
-    def allTestCases = testCaseFinder.pair(relativeTo(globalBase))
+    def allTestCases = testCaseFinder.pair(Path.relativeTo(globalBase))
     def basePathExamples = new FixedSetExamples(basePaths)
     private def equiv(f1: File, f2: File) = f1.getCanonicalFile == f2.getCanonicalFile
     def parentChain(f: File): Iterator[File] =

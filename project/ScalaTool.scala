@@ -1,6 +1,7 @@
 import sbt._
 import org.apache.commons.lang3.SystemUtils
 import org.apache.commons.lang3.StringUtils.replaceEach
+import sbt._, syntax._, Keys._
 
 /**
  * A class that generates a shell or batch script to execute a Scala program.

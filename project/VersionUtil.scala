@@ -4,6 +4,7 @@ import java.util.Properties
 import java.io.FileInputStream
 import scala.collection.JavaConverters._
 import scala.sys.process.Process
+import sbt._, syntax._, Keys._
 
 object VersionUtil {
   lazy val baseVersion = settingKey[String]("The base version number from which all others are derived")
